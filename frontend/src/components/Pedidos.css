@@ -1,0 +1,97 @@
+body {
+  background-color: #F5F5F5;
+  font-family: sans-serif;
+}
+
+.pedidos-container {
+  padding: 16px;
+}
+
+.form-layout {
+  background-color: #FFFFFF;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  margin: 16px;
+  padding: 16px;
+}
+
+.form-title {
+  color: #1E90FF;
+  font-size: 18px;
+  font-weight: bold;
+  margin-bottom: 16px;
+}
+
+.form-edit-text {
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-sizing: border-box; /* Asegura que el padding no afecte el ancho total */
+}
+
+.action-buttons {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+
+.action-buttons button {
+  flex-grow: 1;
+  padding: 12px;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.btn-guardar {
+  background-color: #4CAF50;
+  margin-right: 8px;
+}
+
+.btn-limpiar {
+  background-color: #FF9800;
+  margin-left: 8px;
+}
+
+.list-layout {
+  margin: 16px;
+}
+
+.list-title {
+  font-size: 16px;
+  font-weight: bold;
+  margin-top: 16px;
+  margin-left: 16px;
+}
+
+.recycler-view {
+  padding-bottom: 16px;
+}
+
+.list-item {
+  background-color: #FFFFFF;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  padding: 16px;
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.item-details p {
+  margin: 4px 0;
+}
+
+.btn-eliminar {
+  background-color: #f44336;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+}

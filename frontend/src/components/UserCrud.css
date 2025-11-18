@@ -1,0 +1,125 @@
+/* --- Contenedor Principal y Título --- */
+.user-crud-container {
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+.user-crud-container h2 {
+  color: #333;
+  margin-top: 0;
+  margin-bottom: 25px;
+}
+
+/* --- Formulario de Creación de Usuario --- */
+.user-form {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  background-color: #fff;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+  margin-bottom: 30px;
+}
+
+.user-form input,
+.user-form select {
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 16px;
+  flex-grow: 1; /* Ocupa el espacio disponible */
+}
+
+.user-form button {
+  background-color: var(--accent);
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 5px;
+  font-size: 16px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  flex-shrink: 0; /* Evita que el botón se encoja */
+}
+
+.user-form button:hover {
+  background-color: #005f8a;
+}
+
+.user-form button:disabled {
+  background-color: #a5a5a5;
+  cursor: not-allowed;
+}
+
+/* --- Mensaje de Error --- */
+.error-message {
+  background-color: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
+  padding: 15px;
+  border-radius: 5px;
+  margin-bottom: 20px;
+}
+
+/* --- Tabla de Usuarios --- */
+.user-table {
+  width: 100%;
+  border-collapse: collapse;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+  overflow: hidden; /* Para que el border-radius se aplique a la tabla */
+}
+
+.user-table th,
+.user-table td {
+  padding: 12px 15px;
+  text-align: left;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.user-table thead th {
+  background-color: #f4f6fa;
+  font-weight: 600;
+  color: #333;
+}
+
+.user-table tbody tr:last-child td {
+  border-bottom: none; /* Elimina la última línea */
+}
+
+.user-table tbody tr:hover {
+  background-color: #f9f9f9;
+}
+
+/* --- Botones de Acciones en la Tabla --- */
+.user-table td button {
+  padding: 6px 12px;
+  margin-right: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  background-color: #f0f0f0;
+  transition: background-color 0.2s;
+}
+
+.user-table td button:hover {
+  background-color: #e0e0e0;
+}
+
+.user-table td .delete-btn {
+  background-color: #f8d7da;
+  border-color: #f5c6cb;
+  color: #721c24;
+}
+
+.user-table td .delete-btn:hover {
+  background-color: #f1b0b7;
+}
+
+/* --- Animación de Entrada --- */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}

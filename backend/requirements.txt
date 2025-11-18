@@ -1,0 +1,49 @@
+# -------------------
+# Core backend
+# -------------------
+Flask==3.0.3
+Flask-Cors==4.0.0
+Flask-JWT-Extended==4.6.0
+Flask-SQLAlchemy==3.1.1
+Werkzeug==3.0.3
+gunicorn==22.0.0
+
+# -------------------
+# Data science / ML
+# -------------------
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+joblib==1.4.2
+
+# -------------------
+# Geo & Graphs
+# -------------------
+osmnx==1.9.3
+networkx==3.2.1
+geopandas==0.14.4
+shapely==2.0.4
+pyproj==3.6.1
+fiona==1.9.6
+rtree==1.2.0
+
+# -------------------
+# Extra utils
+# -------------------
+requests==2.32.3
+
+# -------------------
+# Auth & Email
+# -------------------
+Flask-Mail==0.9.1
+Flask-Bcrypt==1.0.1
+
+# -------------------
+# Env management
+# -------------------
+python-dotenv==1.0.1
+
+# -------------------
+# PostgreSQL adapter
+# -------------------
+psycopg2-binary==2.9.9

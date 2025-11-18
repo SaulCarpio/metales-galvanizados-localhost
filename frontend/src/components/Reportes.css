@@ -1,0 +1,66 @@
+.reportes-container {
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+.reportes-container h2 {
+  color: #333;
+}
+
+.reportes-container p {
+  color: #666;
+  margin-bottom: 30px;
+}
+
+.report-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+  background-color: #fff;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+  margin-bottom: 30px;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.filter-group label {
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: #444;
+}
+
+.form-input, .form-select {
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 16px;
+}
+
+.report-actions {
+  text-align: right;
+}
+
+.btn-generar {
+  background-color: var(--accent);
+  color: white;
+  padding: 12px 25px;
+  border: none;
+  border-radius: 5px;
+  font-size: 16px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.btn-generar:hover {
+  background-color: #005f8a;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
