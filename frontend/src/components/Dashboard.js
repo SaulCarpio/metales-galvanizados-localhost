@@ -1,20 +1,57 @@
-import React, { useState } from 'react';
+/* eslint-disable react-hooks/exhaustive-deps */
+import React, { useState, useEffect } from 'react';
 
 // Asegúrate de que las rutas a tus componentes son correctas
 import UserCrud from './UserCrud';
 import MapView from './MapView';
 import Pedidos from './PedidosCrud';
 import Cotizaciones from './CotizacionCrud';
-import Reportes from './Reportes'; // <-- 1. IMPORTA EL NUEVO COMPONENTE
+import Reportes from './Reportes';
+import { SummaryCards, InventoryList } from './Charts';
+import { cotizacionesAPI, pedidosAPI, inventarioAPI } from '../utils/api';
+import ProveedorCrud from './ProveedorCrud';
+import OrdenCompraCrud from './OrdenCompraCrud';
+import CuentasPagarCrud from './CuentasPagarCrud';
+import MovimientosPagoCrud from './MovimientosPagoCrud';
+import ProductoCrud from './ProductoCrud'; // ← IMPORTAR
+import InventarioCrud from './InventarioCrud';
 
 import './Dashboard.css';
 
 const Dashboard = () => {
-  // El estado inicial ahora es 'inicio' para ver el nuevo dashboard al cargar
   const [activeTab, setActiveTab] = useState('inicio'); 
   const [openModule, setOpenModule] = useState(null);
   
   const role = localStorage.getItem('role') || 'usuario';
+
+  const [cotizacionesData, setCotizacionesData] = useState([]);
+  const [pedidosData, setPedidosData] = useState([]);
+  const [inventarioData, setInventarioData] = useState([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [cRes, pRes, iRes] = await Promise.all([
+          cotizacionesAPI.list().catch(() => ({})),
+          pedidosAPI.list().catch(() => ({})),
+          inventarioAPI.list().catch(() => ({}))
+        ]);
+        setCotizacionesData(cRes.data && cRes.data.success ? (cRes.data.cotizaciones || []) : []);
+        setPedidosData(pRes.data && pRes.data.success ? (pRes.data.pedidos || []) : []);
+        setInventarioData(iRes.data && iRes.data.success ? (iRes.data.inventario || []) : []);
+      } catch (e) { console.error('Error cargando datos dashboard', e); }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'map') return;
+    (async () => {
+      try {
+        const pRes = await pedidosAPI.list();
+        setPedidosData(pRes.data && pRes.data.success ? (pRes.data.pedidos || []) : []);
+      } catch (e) { console.error('Error recargando pedidos para mapa', e); }
+    })();
+  }, [activeTab]);
 
   const handleLogout = () => {
     localStorage.clear();
@@ -27,7 +64,6 @@ const Dashboard = () => {
 
   const renderActiveTabContent = () => {
     switch (activeTab) {
-      // --- 2. SECCIÓN DE INICIO ACTUALIZADA CON GRÁFICOS ---
       case 'inicio':
         return (
           <div className="inicio-dashboard">
@@ -51,18 +87,21 @@ const Dashboard = () => {
             </div>
             <div className="charts-grid">
               <div className="chart-container">
-                <h4>Ventas por Categoría (Últimos 6 meses)</h4>
-                {/* Aquí iría tu componente de gráfico de barras */}
-                <div className="chart-placeholder"></div>
+                <h4>Resumen Cotizaciones</h4>
+                <SummaryCards title="Cotizaciones" rows={cotizacionesData} />
               </div>
               <div className="chart-container">
-                <h4>Distribución de Pedidos</h4>
-                {/* Aquí iría tu componente de gráfico de pastel */}
-                <div className="chart-placeholder"></div>
+                <h4>Resumen Pedidos</h4>
+                <SummaryCards title="Pedidos" rows={pedidosData} />
+              </div>
+              <div className="chart-container" style={{gridColumn: '1 / -1'}}>
+                <h4>Existencias (Resumen)</h4>
+                <InventoryList rows={inventarioData} />
               </div>
             </div>
           </div>
         );
+
       case 'map':
         return (
           <div className="map-layout">
@@ -70,25 +109,73 @@ const Dashboard = () => {
               <MapView initialCoord={[-16.482392, -68.242340]} />
             </div>
             <aside className="map-history">
-              <h3>Historial de Viajes</h3>
+              <h3>Pedidos pendientes</h3>
               <ul className="history-list">
-                <li><div className="hist-title">Ruta A</div><div className="hist-meta">2025-10-20 — Completado</div></li>
-                <li><div className="hist-title">Ruta B</div><div className="hist-meta">2025-10-18 — En curso</div></li>
+                {pedidosData && pedidosData.filter(p => p.estado === 'pendiente').length === 0 && (
+                  <li>No hay pedidos pendientes</li>
+                )}
+                {pedidosData && pedidosData.filter(p => p.estado === 'pendiente').map(p => (
+                  <li key={p.id} style={{display:'flex',flexDirection:'column',gap:6}}>
+                    <div style={{display:'flex',justifyContent:'space-between'}}>
+                      <div className="hist-title">Pedido #{p.id}</div>
+                      <div className="hist-meta">Cliente: {p.cliente_id || 'N/A'}</div>
+                    </div>
+                    <div style={{display:'flex',gap:8}}>
+                      <button className="btn btn-primary" onClick={() => {
+                        try { localStorage.setItem('openMapPedido', JSON.stringify({ pedidoId: p.id })); } catch(e){/* ignore */}
+                        window.location.reload();
+                      }}>Abrir en Mapa</button>
+                      <button className="btn btn-secondary" onClick={async () => {
+                        try {
+                          await pedidosAPI.update(p.id, { estado: 'completado' });
+                          const pRes = await pedidosAPI.list();
+                          setPedidosData(pRes.data && pRes.data.success ? (pRes.data.pedidos || []) : []);
+                          alert('Pedido marcado como entregado');
+                        } catch (e) { console.error(e); alert('Error marcando pedido'); }
+                      }}>Marcar entregado</button>
+                    </div>
+                  </li>
+                ))}
               </ul>
             </aside>
           </div>
         );
-      // --- 3. AÑADIDO EL CASO PARA RENDERIZAR REPORTES ---
+
       case 'reportes':
         if (role === 'admin') return <Reportes />;
         return <div className="placeholder"><h2>Acceso Denegado</h2></div>;
+
       case 'usuarios':
         if (role === 'admin') return <UserCrud />;
         return <div className="placeholder"><h2>Acceso Denegado</h2></div>;
+
       case 'cotizaciones':
         return <Cotizaciones />;
+
+      case 'proveedores':
+        return <ProveedorCrud />;
+
+      case 'ordenes':
+        return <OrdenCompraCrud />;
+
+      case 'cuentas':
+        return (
+          <div>
+            <CuentasPagarCrud />
+            <MovimientosPagoCrud />
+          </div>
+        );
+
+      // ← CORREGIDO: Renderizar el componente ProductoCrud
+      case 'fabrica':
+        return <ProductoCrud />;
+
+      case 'existencias':
+        return <InventarioCrud />;
+
       case 'pedidos':
         return <Pedidos />;
+
       default:
         return (
           <div className="placeholder">
@@ -131,19 +218,36 @@ const Dashboard = () => {
               <button className="sidebar-item" onClick={() => toggleModule('finanzas')}>
                 💰 Finanzas y Contabilidad
               </button>
-              {openModule === 'finanzas' && ( <div className="sidebar-submenu"><button onClick={() => setActiveTab('cuentas')}>Gestión Cuentas</button></div> )}
+              {openModule === 'finanzas' && (
+                <div className="sidebar-submenu">
+                  <button onClick={() => setActiveTab('cuentas')}>Gestión Cuentas</button>
+                </div>
+              )}
             </div>
+
+            {/* ← CORREGIDO: Agregar Gestión Fábrica al submenu */}
             <div className="sidebar-section">
               <button className="sidebar-item" onClick={() => toggleModule('inventario')}>
                 🏭 Gestión de Inventario
               </button>
-               {openModule === 'inventario' && ( <div className="sidebar-submenu"><button onClick={() => setActiveTab('existencias')}>Control Existencias</button></div> )}
+              {openModule === 'inventario' && (
+                <div className="sidebar-submenu">
+                  <button onClick={() => setActiveTab('fabrica')}>Gestión Fábrica</button>
+                  <button onClick={() => setActiveTab('existencias')}>Control Existencias</button>
+                </div>
+              )}
             </div>
-             <div className="sidebar-section">
+
+            <div className="sidebar-section">
               <button className="sidebar-item" onClick={() => toggleModule('compras')}>
                 🛒 Compras y Proveedores
               </button>
-              {openModule === 'compras' && ( <div className="sidebar-submenu"><button onClick={() => setActiveTab('ordenes')}>Órdenes de Compra</button></div> )}
+              {openModule === 'compras' && (
+                <div className="sidebar-submenu">
+                  <button onClick={() => setActiveTab('ordenes')}>Órdenes de Compra</button>
+                  <button onClick={() => setActiveTab('proveedores')}>Proveedores</button>
+                </div>
+              )}
             </div>
           </>
         )}
@@ -161,9 +265,9 @@ const Dashboard = () => {
         </div>
         
         {role === 'admin' && (
-            <button className={`sidebar-item ${activeTab === 'reportes' ? 'active' : ''}`} onClick={() => setActiveTab('reportes')}>
-                📈 Reportes
-            </button>
+          <button className={`sidebar-item ${activeTab === 'reportes' ? 'active' : ''}`} onClick={() => setActiveTab('reportes')}>
+            📈 Reportes
+          </button>
         )}
 
         <button className="logout-button" onClick={handleLogout}>

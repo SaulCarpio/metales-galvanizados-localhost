@@ -71,11 +71,22 @@ const MapView = ({ initialCoord = null }) => {
   const [error, setError] = useState(null);
   const [routeInfo, setRouteInfo] = useState(null);
 
+  const [pendingPedidos, setPendingPedidos] = useState([]);
+  const [pedidoAddMode, setPedidoAddMode] = useState(null); // pedido id for which we're adding address
+  const [addressAddedByPedido, setAddressAddedByPedido] = useState({});
+
   const handleMapClick = useCallback((e) => {
     if (isAddingPoints) {
       setWaypoints(prevWaypoints => [...prevWaypoints, e.latlng]);
+      if (pedidoAddMode) {
+        // mark that this pedido has an address added (local UI state)
+        setAddressAddedByPedido(prev => ({ ...prev, [pedidoAddMode]: true }));
+        // exit add mode for that pedido
+        setPedidoAddMode(null);
+        setIsAddingPoints(false);
+      }
     }
-  }, [isAddingPoints]);
+  }, [isAddingPoints, pedidoAddMode]);
 
   useEffect(() => {
     if (mapInstance.current) return;
@@ -131,6 +142,30 @@ const MapView = ({ initialCoord = null }) => {
     });
   }, [waypoints]);
 
+  // Cargar pedidos pendientes y manejar redirección desde creación de pedido
+  useEffect(() => {
+    fetchPendingPedidos();
+    const open = localStorage.getItem('openMapPedido');
+    if (open) {
+      try {
+        const obj = JSON.parse(open);
+        localStorage.removeItem('openMapPedido');
+        // abrir modo agregar dirección para ese pedido
+        setTimeout(() => setPedidoAddMode(obj.pedidoId), 600);
+      } catch (e) { console.error(e); }
+    }
+  }, []);
+
+  const fetchPendingPedidos = async () => {
+    try {
+      const r = await axios.get(`${API_BASE_URL}/api/pedidos`);
+      if (r.data && r.data.pedidos) {
+        const pendientes = r.data.pedidos.filter(p => p.estado === 'pendiente');
+        setPendingPedidos(pendientes);
+      }
+    } catch (e) { console.error('Error cargando pedidos', e); }
+  };
+
   const clearTrip = () => {
     if (initialCoord) {
       setWaypoints([L.latLng(initialCoord[0], initialCoord[1])]);
@@ -140,6 +175,22 @@ const MapView = ({ initialCoord = null }) => {
     routeLayer.current?.clearLayers();
     setRouteInfo(null);
     setError(null);
+  };
+
+  const handleStartAddAddress = (pedidoId) => {
+    setPedidoAddMode(pedidoId);
+    setIsAddingPoints(true);
+    alert('Modo: agregue la dirección haciendo clic en el mapa.');
+  };
+
+  const handleMarkDelivered = async (pedidoId) => {
+    if (!addressAddedByPedido[pedidoId]) return;
+    try {
+      await axios.put(`${API_BASE_URL}/api/pedidos/${pedidoId}`, { estado: 'completado' });
+      fetchPendingPedidos();
+      setAddressAddedByPedido(prev => ({ ...prev, [pedidoId]: false }));
+      alert('Pedido marcado como entregado');
+    } catch (e) { console.error('Error marcando entregado', e); alert('Error marcando pedido'); }
   };
 
   const findOptimalRoute = async () => {
@@ -226,12 +277,6 @@ const MapView = ({ initialCoord = null }) => {
           <div className="info-row"><span className="info-label">Distancia:</span><span className="info-value">{routeInfo.distance} km</span></div>
           <div className="info-row"><span className="info-label">⏱️ Tiempo Estimado:</span><span className="info-value">{routeInfo.time} min</span></div>
           <div className="info-row"><span className="info-label">📡 Latencia Total:</span><span className="info-value">{routeInfo.latency} ms</span></div>
-        </div>
-      )}
-
-      {routeInfo && (
-        <div className="add-more-btn" onClick={handleAddMorePoints}>
-          ➕ Añadir más puntos
         </div>
       )}
 

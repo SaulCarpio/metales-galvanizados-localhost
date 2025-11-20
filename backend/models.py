@@ -376,6 +376,32 @@ class Distribuidor(db.Model):
 
 
 # =========================
+# ÓRDENES DE COMPRA
+# =========================
+
+class OrdenCompra(db.Model):
+    __tablename__ = 'ordenes_compra'
+    id = db.Column(db.Integer, primary_key=True)
+    proveedor_id = db.Column(db.Integer, db.ForeignKey('proveedores.id'), nullable=False)
+    referencia = db.Column(db.String(200))
+    fecha = db.Column(db.DateTime, server_default=db.func.now())
+    estado = db.Column(db.String(50), default='borrador')  # borrador, enviado, recibido, cancelado
+    total = db.Column(db.Numeric(14,2), nullable=False, default=0)
+    proveedor = db.relationship('Proveedor', backref='ordenes_compra')
+    detalles = db.relationship('OrdenCompraDetalle', backref='orden', cascade='all, delete-orphan', lazy=True)
+
+
+class OrdenCompraDetalle(db.Model):
+    __tablename__ = 'ordenes_compra_detalles'
+    id = db.Column(db.Integer, primary_key=True)
+    orden_id = db.Column(db.Integer, db.ForeignKey('ordenes_compra.id', ondelete='CASCADE'))
+    producto_id = db.Column(db.Integer, db.ForeignKey('productos.id'))
+    cantidad = db.Column(db.Numeric(12,3), nullable=False, default=1)
+    precio_unitario = db.Column(db.Numeric(14,2), nullable=False, default=0)
+    subtotal = db.Column(db.Numeric(16,2), nullable=False, default=0)
+
+
+# =========================
 # FINANZAS: CUENTAS POR PAGAR / COBRAR y PAGOS PARCIALES
 # =========================
 
@@ -504,10 +530,6 @@ class HistorialPrecio(db.Model):
     usuario_id = db.Column(db.Integer, db.ForeignKey('usuarios.id'), nullable=True)
 
 
-# =========================
-# VENTAS: COTIZACIONES
-# =========================
-
 class Cotizacion(db.Model):
     """
     Cotizaciones de venta:
@@ -525,10 +547,11 @@ class Cotizacion(db.Model):
     cantidad = db.Column(db.Numeric(12,3))
     estado = db.Column(db.String(50), default='emitida')  # emitida, aceptada, vencida, cancelada
     usuario_id = db.Column(db.Integer, db.ForeignKey('usuarios.id'), nullable=True)
+    detalles = db.Column(db.JSON, nullable=True)
 
 
 # =========================
-# REPORTES (opcional)
+# REPORTES 
 # =========================
 
 class ReporteGuardado(db.Model):
@@ -574,10 +597,7 @@ class PrediccionML(db.Model):
     resultado = db.Column(db.String(100))
     probabilidad = db.Column(db.Numeric(6,4), nullable=True)
     fecha = db.Column(db.DateTime, server_default=db.func.now())
-    # puedes relacionar con Pedido o Ruta si deseas: p.ej. pedido_id = db.Column(...)
 
-
-# Fin del archivo models.py
 # =========================
 # CÓDIGOS DE VERIFICACIÓN
 # =========================

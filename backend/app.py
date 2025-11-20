@@ -5,6 +5,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Mail, Message
+from flask_migrate import Migrate
 from dotenv import load_dotenv
 import os
 import random
@@ -17,6 +18,7 @@ import numpy as np
 import osmnx as ox
 import networkx as nx
 from models import db, User, Role, CodigosVerificacion, Cotizacion, Pedido, PedidoDetalle
+from models import Proveedor, OrdenCompra, OrdenCompraDetalle, CuentaPagar, CuentaCobrar, MovimientoPago, InventarioSucursal, MetodoPago
 from ml.ruta_modelo import load_graph_z16, shortest_route_stats, ensure_edge_speeds
 
 # =========================
@@ -89,6 +91,7 @@ app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 
 db.init_app(app)
+migrate = Migrate(app, db)
 mail = Mail(app)
 
 # =========================
@@ -323,11 +326,11 @@ def predict_route_time():
     if dist_m is None or base_time_sec is None:
         return jsonify({'success': False, 'message': 'Se requieren dist_m y base_time_sec'}), 400
 
-    # Cargar el modelo entrenado
-    try:
-        model = joblib.load(MODEL_PATH)
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Error cargando el modelo: {str(e)}'}), 500
+    # Cargar el modelo entrenado (usa la función que cachea el modelo)
+    model = load_ml_model()
+    if not model:
+        # No se pudo cargar el modelo — devolver estimación basada en base_time_sec
+        return jsonify({'success': True, 'predicted_time_sec': base_time_sec, 'predicted_time_min': round(base_time_sec / 60.0, 2)})
 
     # Preparar datos para predicción
     X = np.array([[dist_m, base_time_sec, is_thursday]])
@@ -415,32 +418,31 @@ def health_check():
 # -------------------------
 # CRUD Cotizaciones
 # -------------------------
+
 @app.route('/api/cotizaciones', methods=['GET'])
 def list_cotizaciones():
     try:
         cotizaciones = Cotizacion.query.order_by(Cotizacion.fecha_emitida.desc()).all()
         data = [{
             'id': c.id,
-            'cliente_id': c.cliente_id,
             'nombre_cliente': c.nombre_cliente,
             'producto': c.producto,
             'color': c.color,
-            'fecha_emitida': c.fecha_emitida.isoformat() if c.fecha_emitida else None,
-            'fecha_expiracion': c.fecha_expiracion.isoformat() if c.fecha_expiracion else None,
-            'precio_unitario': float(c.precio_unitario) if c.precio_unitario is not None else None,
             'cantidad': float(c.cantidad) if c.cantidad is not None else None,
             'estado': c.estado,
-            'usuario_id': c.usuario_id
         } for c in cotizaciones]
         return jsonify({'success': True, 'cotizaciones': data})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
+# === RUTA MODIFICADA ===
 @app.route('/api/cotizaciones/<int:cid>', methods=['GET'])
 def get_cotizacion(cid):
     c = Cotizacion.query.get(cid)
     if not c:
         return jsonify({'success': False, 'message': 'Cotización no encontrada'}), 404
+    
+    # Se crea el diccionario base con los datos principales
     data = {
         'id': c.id,
         'cliente_id': c.cliente_id,
@@ -454,12 +456,31 @@ def get_cotizacion(cid):
         'estado': c.estado,
         'usuario_id': c.usuario_id
     }
+
+    # --- CAMBIO CLAVE ---
+    # Si existen datos en la columna 'detalles', se añaden a la respuesta.
+    # Esto "fusiona" los detalles (calaminas, cumbreras, etc.) con los datos principales.
+    if c.detalles:
+        data.update(c.detalles)
+
     return jsonify({'success': True, 'cotizacion': data})
 
+# === RUTA MODIFICADA ===
 @app.route('/api/cotizaciones', methods=['POST'])
 def create_cotizacion():
     try:
         payload = request.get_json()
+
+        # --- CAMBIO CLAVE ---
+        # Se extraen los detalles del payload para guardarlos en el campo JSON.
+        detalles_para_db = {
+            'calaminas': payload.get('calaminas', []),
+            'cumbreras': payload.get('cumbreras', []),
+            'tipo_cumbrera': payload.get('tipo_cumbrera'),
+            'total_calaminas': payload.get('total_calaminas'),
+            'total_cumbreras': payload.get('total_cumbreras')
+        }
+
         c = Cotizacion(
             cliente_id=payload.get('cliente_id'),
             nombre_cliente=payload.get('nombre_cliente'),
@@ -469,7 +490,10 @@ def create_cotizacion():
             precio_unitario=payload.get('precio_unitario'),
             cantidad=payload.get('cantidad'),
             estado=payload.get('estado', 'emitida'),
-            usuario_id=payload.get('usuario_id')
+            usuario_id=payload.get('usuario_id'),
+            
+            # Se asigna el diccionario de detalles al nuevo campo del modelo.
+            detalles=detalles_para_db
         )
         db.session.add(c)
         db.session.commit()
@@ -484,10 +508,25 @@ def update_cotizacion(cid):
         c = Cotizacion.query.get(cid)
         if not c:
             return jsonify({'success': False, 'message': 'Cotización no encontrada'}), 404
+        
         payload = request.get_json()
+        
+        # Actualiza los campos normales
         for field in ['cliente_id','nombre_cliente','producto','color','fecha_expiracion','precio_unitario','cantidad','estado','usuario_id']:
             if field in payload:
                 setattr(c, field, payload.get(field))
+
+        # --- CAMBIO SUGERIDO ---
+        # Si quieres que se puedan actualizar los detalles, añade esta lógica
+        if 'calaminas' in payload or 'cumbreras' in payload:
+            detalles_actualizados = c.detalles or {}
+            detalles_actualizados.update({
+                'calaminas': payload.get('calaminas', detalles_actualizados.get('calaminas')),
+                'cumbreras': payload.get('cumbreras', detalles_actualizados.get('cumbreras')),
+                # ... puedes añadir otros campos de detalles aquí
+            })
+            c.detalles = detalles_actualizados
+        
         db.session.commit()
         return jsonify({'success': True})
     except Exception as e:
@@ -496,6 +535,7 @@ def update_cotizacion(cid):
 
 @app.route('/api/cotizaciones/<int:cid>', methods=['DELETE'])
 def delete_cotizacion(cid):
+    # Esta ruta no necesita cambios, ya funciona correctamente.
     try:
         c = Cotizacion.query.get(cid)
         if not c:
@@ -627,6 +667,550 @@ def delete_pedido(pid):
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+# =========================
+# CRUD Proveedores
+# =========================
+@app.route('/api/proveedores', methods=['GET'])
+def list_proveedores():
+    try:
+        provs = Proveedor.query.order_by(Proveedor.nombre).all()
+        data = [{'id': p.id, 'nombre': p.nombre, 'contacto': p.contacto, 'telefono': p.telefono, 'direccion': p.direccion, 'datos_extra': p.datos_extra} for p in provs]
+        return jsonify({'success': True, 'proveedores': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/proveedores/<int:pid>', methods=['GET'])
+def get_proveedor(pid):
+    p = Proveedor.query.get(pid)
+    if not p:
+        return jsonify({'success': False, 'message': 'Proveedor no encontrado'}), 404
+    return jsonify({'success': True, 'proveedor': {'id': p.id, 'nombre': p.nombre, 'contacto': p.contacto, 'telefono': p.telefono, 'direccion': p.direccion, 'datos_extra': p.datos_extra}})
+
+
+@app.route('/api/proveedores', methods=['POST'])
+def create_proveedor():
+    try:
+        payload = request.get_json()
+        p = Proveedor(
+            nombre=payload.get('nombre'),
+            contacto=payload.get('contacto'),
+            telefono=payload.get('telefono'),
+            direccion=payload.get('direccion'),
+            datos_extra=payload.get('datos_extra')
+        )
+        db.session.add(p)
+        db.session.commit()
+        return jsonify({'success': True, 'id': p.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/proveedores/<int:pid>', methods=['PUT'])
+def update_proveedor(pid):
+    try:
+        p = Proveedor.query.get(pid)
+        if not p:
+            return jsonify({'success': False, 'message': 'Proveedor no encontrado'}), 404
+        payload = request.get_json()
+        for field in ['nombre','contacto','telefono','direccion','datos_extra']:
+            if field in payload:
+                setattr(p, field, payload.get(field))
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/proveedores/<int:pid>', methods=['DELETE'])
+def delete_proveedor(pid):
+    try:
+        p = Proveedor.query.get(pid)
+        if not p:
+            return jsonify({'success': False, 'message': 'Proveedor no encontrado'}), 404
+        db.session.delete(p)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =========================
+# CRUD Órdenes de Compra
+# =========================
+@app.route('/api/ordenes-compra', methods=['GET'])
+def list_ordenes_compra():
+    try:
+        ordenes = OrdenCompra.query.order_by(OrdenCompra.fecha.desc()).all()
+        data = []
+        for o in ordenes:
+            detalles = [{'id': d.id, 'producto_id': d.producto_id, 'cantidad': float(d.cantidad), 'precio_unitario': float(d.precio_unitario), 'subtotal': float(d.subtotal)} for d in o.detalles]
+            data.append({'id': o.id, 'proveedor_id': o.proveedor_id, 'referencia': o.referencia, 'fecha': o.fecha.isoformat() if o.fecha else None, 'estado': o.estado, 'total': float(o.total), 'detalles': detalles})
+        return jsonify({'success': True, 'ordenes': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/ordenes-compra/<int:oid>', methods=['GET'])
+def get_orden_compra(oid):
+    o = OrdenCompra.query.get(oid)
+    if not o:
+        return jsonify({'success': False, 'message': 'Orden no encontrada'}), 404
+    detalles = [{'id': d.id, 'producto_id': d.producto_id, 'cantidad': float(d.cantidad), 'precio_unitario': float(d.precio_unitario), 'subtotal': float(d.subtotal)} for d in o.detalles]
+    return jsonify({'success': True, 'orden': {'id': o.id, 'proveedor_id': o.proveedor_id, 'referencia': o.referencia, 'fecha': o.fecha.isoformat() if o.fecha else None, 'estado': o.estado, 'total': float(o.total), 'detalles': detalles}})
+
+
+@app.route('/api/ordenes-compra', methods=['POST'])
+def create_orden_compra():
+    try:
+        payload = request.get_json()
+        detalles_payload = payload.get('detalles', [])
+        o = OrdenCompra(
+            proveedor_id=payload.get('proveedor_id'),
+            referencia=payload.get('referencia'),
+            estado=payload.get('estado', 'borrador')
+        )
+        db.session.add(o)
+        db.session.flush()
+        total_calc = 0
+        for d in detalles_payload:
+            subtotal = float(d.get('cantidad', 0)) * float(d.get('precio_unitario', 0))
+            od = OrdenCompraDetalle(
+                orden_id=o.id,
+                producto_id=d.get('producto_id'),
+                cantidad=d.get('cantidad'),
+                precio_unitario=d.get('precio_unitario'),
+                subtotal=subtotal
+            )
+            db.session.add(od)
+            total_calc += subtotal
+        o.total = total_calc
+        db.session.commit()
+        return jsonify({'success': True, 'id': o.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/ordenes-compra/<int:oid>', methods=['PUT'])
+def update_orden_compra(oid):
+    try:
+        o = OrdenCompra.query.get(oid)
+        if not o:
+            return jsonify({'success': False, 'message': 'Orden no encontrada'}), 404
+        payload = request.get_json()
+        for field in ['proveedor_id','referencia','estado']:
+            if field in payload:
+                setattr(o, field, payload.get(field))
+        if 'detalles' in payload:
+            OrdenCompraDetalle.query.filter_by(orden_id=o.id).delete()
+            total_calc = 0
+            for d in payload['detalles']:
+                subtotal = float(d.get('cantidad', 0)) * float(d.get('precio_unitario', 0))
+                od = OrdenCompraDetalle(orden_id=o.id, producto_id=d.get('producto_id'), cantidad=d.get('cantidad'), precio_unitario=d.get('precio_unitario'), subtotal=subtotal)
+                db.session.add(od)
+                total_calc += subtotal
+            o.total = total_calc
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/ordenes-compra/<int:oid>', methods=['DELETE'])
+def delete_orden_compra(oid):
+    try:
+        o = OrdenCompra.query.get(oid)
+        if not o:
+            return jsonify({'success': False, 'message': 'Orden no encontrada'}), 404
+        OrdenCompraDetalle.query.filter_by(orden_id=o.id).delete()
+        db.session.delete(o)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =========================
+# CRUD Finanzas: Cuentas y Movimientos
+# =========================
+@app.route('/api/cuentas-pagar', methods=['GET'])
+def list_cuentas_pagar():
+    try:
+        cuentas = CuentaPagar.query.order_by(CuentaPagar.fecha_emision.desc()).all()
+        data = [{'id': c.id, 'proveedor_id': c.proveedor_id, 'referencia': c.referencia, 'monto_total': float(c.monto_total), 'monto_pagado': float(c.monto_pagado), 'fecha_emision': c.fecha_emision.isoformat() if c.fecha_emision else None, 'fecha_vencimiento': c.fecha_vencimiento.isoformat() if c.fecha_vencimiento else None, 'estado': c.estado, 'descripcion': c.descripcion} for c in cuentas]
+        return jsonify({'success': True, 'cuentas_pagar': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/cuentas-pagar/<int:cid>', methods=['GET'])
+def get_cuenta_pagar(cid):
+    c = CuentaPagar.query.get(cid)
+    if not c:
+        return jsonify({'success': False, 'message': 'Cuenta no encontrada'}), 404
+    return jsonify({'success': True, 'cuenta': {'id': c.id, 'proveedor_id': c.proveedor_id, 'referencia': c.referencia, 'monto_total': float(c.monto_total), 'monto_pagado': float(c.monto_pagado), 'fecha_emision': c.fecha_emision.isoformat() if c.fecha_emision else None, 'fecha_vencimiento': c.fecha_vencimiento.isoformat() if c.fecha_vencimiento else None, 'estado': c.estado, 'descripcion': c.descripcion}})
+
+
+@app.route('/api/cuentas-pagar', methods=['POST'])
+def create_cuenta_pagar():
+    try:
+        payload = request.get_json()
+        c = CuentaPagar(
+            proveedor_id=payload.get('proveedor_id'),
+            referencia=payload.get('referencia'),
+            monto_total=payload.get('monto_total'),
+            monto_pagado=payload.get('monto_pagado', 0),
+            fecha_vencimiento=payload.get('fecha_vencimiento'),
+            moneda=payload.get('moneda', 'BOB'),
+            estado=payload.get('estado', 'pendiente'),
+            descripcion=payload.get('descripcion')
+        )
+        db.session.add(c)
+        db.session.commit()
+        return jsonify({'success': True, 'id': c.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/cuentas-pagar/<int:cid>', methods=['PUT'])
+def update_cuenta_pagar(cid):
+    try:
+        c = CuentaPagar.query.get(cid)
+        if not c:
+            return jsonify({'success': False, 'message': 'Cuenta no encontrada'}), 404
+        payload = request.get_json()
+        for field in ['proveedor_id','referencia','monto_total','monto_pagado','fecha_vencimiento','moneda','estado','descripcion']:
+            if field in payload:
+                setattr(c, field, payload.get(field))
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/cuentas-pagar/<int:cid>', methods=['DELETE'])
+def delete_cuenta_pagar(cid):
+    try:
+        c = CuentaPagar.query.get(cid)
+        if not c:
+            return jsonify({'success': False, 'message': 'Cuenta no encontrada'}), 404
+        db.session.delete(c)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/movimientos-pago', methods=['GET'])
+def list_movimientos_pago():
+    try:
+        movs = MovimientoPago.query.order_by(MovimientoPago.fecha_pago.desc()).all()
+        data = [{'id': m.id, 'cuenta_pagar_id': m.cuenta_pagar_id, 'cuenta_cobrar_id': m.cuenta_cobrar_id, 'monto': float(m.monto), 'fecha_pago': m.fecha_pago.isoformat() if m.fecha_pago else None, 'metodo_pago_id': m.metodo_pago_id, 'referencia_pago': m.referencia_pago, 'nota': m.nota} for m in movs]
+        return jsonify({'success': True, 'movimientos': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/movimientos-pago', methods=['POST'])
+def create_movimiento_pago():
+    try:
+        payload = request.get_json()
+        m = MovimientoPago(
+            cuenta_pagar_id=payload.get('cuenta_pagar_id'),
+            cuenta_cobrar_id=payload.get('cuenta_cobrar_id'),
+            monto=payload.get('monto'),
+            metodo_pago_id=payload.get('metodo_pago_id'),
+            referencia_pago=payload.get('referencia_pago'),
+            nota=payload.get('nota')
+        )
+        db.session.add(m)
+
+        # actualizar saldos en cuentas
+        if m.cuenta_pagar_id:
+            cp = CuentaPagar.query.get(m.cuenta_pagar_id)
+            if cp:
+                cp.monto_pagado = (cp.monto_pagado or 0) + float(m.monto)
+                # actualizar estado
+                if float(cp.monto_pagado) >= float(cp.monto_total):
+                    cp.estado = 'pagada'
+                else:
+                    cp.estado = 'parcial'
+        if m.cuenta_cobrar_id:
+            cc = CuentaCobrar.query.get(m.cuenta_cobrar_id)
+            if cc:
+                cc.monto_pagado = (cc.monto_pagado or 0) + float(m.monto)
+                if float(cc.monto_pagado) >= float(cc.monto_total):
+                    cc.estado = 'cobrado'
+                else:
+                    cc.estado = 'parcial'
+
+        db.session.commit()
+        return jsonify({'success': True, 'id': m.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =========================
+# CRUD InventarioSucursal (Control de existencias)
+# =========================
+@app.route('/api/inventario', methods=['GET'])
+def list_inventario():
+    try:
+        items = InventarioSucursal.query.order_by(InventarioSucursal.id).all()
+        data = [{'id': i.id, 'producto_id': i.producto_id, 'sucursal_id': i.sucursal_id, 'cantidad': float(i.cantidad), 'estado': i.estado, 'ultimo_movimiento': i.ultimo_movimiento.isoformat() if i.ultimo_movimiento else None} for i in items]
+        return jsonify({'success': True, 'inventario': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/inventario/<int:iid>', methods=['GET'])
+def get_inventario(iid):
+    i = InventarioSucursal.query.get(iid)
+    if not i:
+        return jsonify({'success': False, 'message': 'Registro inventario no encontrado'}), 404
+    return jsonify({'success': True, 'inventario': {'id': i.id, 'producto_id': i.producto_id, 'sucursal_id': i.sucursal_id, 'cantidad': float(i.cantidad), 'estado': i.estado, 'ultimo_movimiento': i.ultimo_movimiento.isoformat() if i.ultimo_movimiento else None}})
+
+
+@app.route('/api/inventario', methods=['POST'])
+def create_inventario():
+    try:
+        payload = request.get_json()
+
+        # Validaciones
+        if not payload.get('producto_id') or not payload.get('sucursal_id'):
+            return jsonify({'success': False, 'message': 'Producto y Sucursal son obligatorios'}), 400
+
+        i = InventarioSucursal(
+            producto_id=int(payload.get('producto_id')),
+            sucursal_id=int(payload.get('sucursal_id')),
+            cantidad=float(payload.get('cantidad', 0)),
+            estado=payload.get('estado', 'disponible')
+        )
+        db.session.add(i)
+        db.session.commit()
+        return jsonify({'success': True, 'id': i.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        print("ERROR Inventario:", e)  # <-- log en consola del backend
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+
+@app.route('/api/inventario/<int:iid>', methods=['PUT'])
+def update_inventario(iid):
+    try:
+        i = InventarioSucursal.query.get(iid)
+        if not i:
+            return jsonify({'success': False, 'message': 'Registro inventario no encontrado'}), 404
+        payload = request.get_json()
+        for field in ['producto_id','sucursal_id','cantidad','estado']:
+            if field in payload:
+                setattr(i, field, payload.get(field))
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/inventario/<int:iid>', methods=['DELETE'])
+def delete_inventario(iid):
+    try:
+        i = InventarioSucursal.query.get(iid)
+        if not i:
+            return jsonify({'success': False, 'message': 'Registro inventario no encontrado'}), 404
+        db.session.delete(i)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# =========================
+# CRUD PRODUCTOS
+# =========================
+@app.route('/api/productos', methods=['GET'])
+def list_productos():
+    try:
+        from models import Producto
+        productos = Producto.query.order_by(Producto.nombre).all()
+        data = [{
+            'id': p.id,
+            'nombre': p.nombre,
+            'descripcion': p.descripcion,
+            'categoria': p.categoria,
+            'precio': float(p.precio) if p.precio else 0,
+            'stock': p.stock,
+            'activo': p.activo
+        } for p in productos]
+        return jsonify({'success': True, 'productos': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/productos/<int:pid>', methods=['GET'])
+def get_producto(pid):
+    from models import Producto
+    p = Producto.query.get(pid)
+    if not p:
+        return jsonify({'success': False, 'message': 'Producto no encontrado'}), 404
+    return jsonify({
+        'success': True,
+        'producto': {
+            'id': p.id,
+            'nombre': p.nombre,
+            'descripcion': p.descripcion,
+            'categoria': p.categoria,
+            'precio': float(p.precio) if p.precio else 0,
+            'stock': p.stock,
+            'activo': p.activo
+        }
+    })
+
+@app.route('/api/productos', methods=['POST'])
+def create_producto():
+    try:
+        from models import Producto
+        payload = request.get_json()
+        p = Producto(
+            nombre=payload.get('nombre'),
+            descripcion=payload.get('descripcion'),
+            categoria=payload.get('categoria'),
+            precio=payload.get('precio'),
+            stock=payload.get('stock', 0),
+            activo=payload.get('activo', True)
+        )
+        db.session.add(p)
+        db.session.commit()
+        return jsonify({'success': True, 'id': p.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/productos/<int:pid>', methods=['PUT'])
+def update_producto(pid):
+    try:
+        from models import Producto
+        p = Producto.query.get(pid)
+        if not p:
+            return jsonify({'success': False, 'message': 'Producto no encontrado'}), 404
+        payload = request.get_json()
+        for field in ['nombre', 'descripcion', 'categoria', 'precio', 'stock', 'activo']:
+            if field in payload:
+                setattr(p, field, payload.get(field))
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/productos/<int:pid>', methods=['DELETE'])
+def delete_producto(pid):
+    try:
+        from models import Producto
+        p = Producto.query.get(pid)
+        if not p:
+            return jsonify({'success': False, 'message': 'Producto no encontrado'}), 404
+        db.session.delete(p)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# =========================
+# CRUD VEHÍCULOS
+# =========================
+@app.route('/api/vehiculos', methods=['GET'])
+def list_vehiculos():
+    try:
+        from models import Vehiculo
+        vehiculos = Vehiculo.query.order_by(Vehiculo.placa).all()
+        data = [{
+            'id': v.id,
+            'placa': v.placa,
+            'marca': v.marca,
+            'modelo': v.modelo,
+            'capacidad': v.capacidad
+        } for v in vehiculos]
+        return jsonify({'success': True, 'vehiculos': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/vehiculos/<int:vid>', methods=['GET'])
+def get_vehiculo(vid):
+    from models import Vehiculo
+    v = Vehiculo.query.get(vid)
+    if not v:
+        return jsonify({'success': False, 'message': 'Vehículo no encontrado'}), 404
+    return jsonify({
+        'success': True,
+        'vehiculo': {
+            'id': v.id,
+            'placa': v.placa,
+            'marca': v.marca,
+            'modelo': v.modelo,
+            'capacidad': v.capacidad
+        }
+    })
+
+@app.route('/api/vehiculos', methods=['POST'])
+def create_vehiculo():
+    try:
+        from models import Vehiculo
+        payload = request.get_json()
+        v = Vehiculo(
+            placa=payload.get('placa'),
+            marca=payload.get('marca'),
+            modelo=payload.get('modelo'),
+            capacidad=payload.get('capacidad', 0)
+        )
+        db.session.add(v)
+        db.session.commit()
+        return jsonify({'success': True, 'id': v.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/vehiculos/<int:vid>', methods=['PUT'])
+def update_vehiculo(vid):
+    try:
+        from models import Vehiculo
+        v = Vehiculo.query.get(vid)
+        if not v:
+            return jsonify({'success': False, 'message': 'Vehículo no encontrado'}), 404
+        payload = request.get_json()
+        for field in ['placa', 'marca', 'modelo', 'capacidad']:
+            if field in payload:
+                setattr(v, field, payload.get(field))
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/vehiculos/<int:vid>', methods=['DELETE'])
+def delete_vehiculo(vid):
+    try:
+        from models import Vehiculo
+        v = Vehiculo.query.get(vid)
+        if not v:
+            return jsonify({'success': False, 'message': 'Vehículo no encontrado'}), 404
+        db.session.delete(v)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 # =========================
 # ENDPOINTS DE ML Y RUTAS OPTIMIZADO PARA MÚLTIPLES PUNTOS

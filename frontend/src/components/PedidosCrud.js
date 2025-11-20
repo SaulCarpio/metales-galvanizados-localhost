@@ -45,29 +45,44 @@ const Pedidos = () => {
 
   const handleSavePedido = async (e) => {
     e.preventDefault();
+
+    // Validaciones mínimas
+    if (!formData.cliente || !formData.producto || !formData.cantidad) {
+      alert("Cliente, producto y cantidad son obligatorios.");
+      return;
+    }
+
     try {
-      // Adapta la estructura de 'formData' a lo que tu API espera
       const pedidoData = {
-        cliente_id: formData.cliente, // Asumiendo que 'cliente' es el ID
+        cliente_id: Number(formData.cliente),
         estado: 'pendiente',
         prioridad: 'normal',
-        total: formData.total,
+        total: Number(formData.total),
         detalles: [
           {
-            // Asume que tienes una forma de obtener el ID del producto
-            producto_id: formData.producto,
-            cantidad: formData.cantidad,
-            subtotal: formData.total, // O como lo calcules
+            producto_id: Number(formData.producto),
+            cantidad: Number(formData.cantidad),
+            subtotal: Number(formData.total),
           },
         ],
       };
-      await axios.post(`${API_BASE}/api/pedidos`, pedidoData);
+
+      const res = await axios.post(`${API_BASE}/api/pedidos`, pedidoData);
+
       setFormData(initialFormState);
+
+      if (res.data && res.data.success && res.data.id) {
+        localStorage.setItem('openMapPedido', JSON.stringify({ pedidoId: res.data.id }));
+        window.location.href = '/dashboard';
+        return;
+      }
+
       fetchPedidos();
     } catch (error) {
       console.error('Error al guardar el pedido:', error);
     }
   };
+
 
   const handleClearForm = () => {
     setFormData(initialFormState);
