@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 import os
 import random
 import string
-from models import db, User, Role, CodigosVerificacion
 from flask_bcrypt import Bcrypt
 import datetime
 import joblib
@@ -557,21 +556,21 @@ def list_pedidos():
         data = []
         for p in pedidos:
             detalles = PedidoDetalle.query.filter_by(pedido_id=p.id).all()
-            detalles_list = [{
-                'id': d.id, 'producto_id': d.producto_id, 'cantidad': int(d.cantidad), 'subtotal': float(d.subtotal)
-            } for d in detalles]
+            detalles_list = [{'id': d.id, 'producto_id': d.producto_id, 'cantidad': int(d.cantidad), 'subtotal': float(d.subtotal)} for d in detalles]
             data.append({
                 'id': p.id,
                 'cliente_id': p.cliente_id,
                 'fecha_pedido': p.fecha_pedido.isoformat() if p.fecha_pedido else None,
                 'estado': p.estado,
                 'prioridad': p.prioridad,
-                'total': float(p.total) if p.total is not None else None,
+                'total': float(p.total) if p.total else 0,
+                'vehiculo_id': p.vehiculo_id,  # 🔥 VEHÍCULO ASIGNADO
                 'detalles': detalles_list
             })
         return jsonify({'success': True, 'pedidos': data})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
 
 @app.route('/api/pedidos/<int:pid>', methods=['GET'])
 def get_pedido(pid):
@@ -627,11 +626,11 @@ def update_pedido(pid):
         if not p:
             return jsonify({'success': False, 'message': 'Pedido no encontrado'}), 404
         payload = request.get_json()
-        # actualizar campos simples
-        for field in ['cliente_id','estado','prioridad','total']:
+        # campos simples
+        for field in ['cliente_id','estado','prioridad','total','vehiculo_id']:
             if field in payload:
                 setattr(p, field, payload.get(field))
-        # actualizar detalles (opcional): recibir lista completa y reemplazar
+        # detalles
         if 'detalles' in payload:
             PedidoDetalle.query.filter_by(pedido_id=p.id).delete()
             total_calc = 0
@@ -650,6 +649,7 @@ def update_pedido(pid):
     except Exception as e:
         db.session.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
+
 
 @app.route('/api/pedidos/<int:pid>', methods=['DELETE'])
 def delete_pedido(pid):
@@ -1211,6 +1211,130 @@ def delete_vehiculo(vid):
     except Exception as e:
         db.session.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
+    
+
+# =========================
+# CRUD CLIENTES
+# =========================
+@app.route('/api/clientes', methods=['GET'])
+def list_clientes():
+    try:
+        from models import Cliente, User
+        clientes = Cliente.query.join(User).all()
+        data = [{
+            'id': c.id,
+            'usuario_id': c.usuario_id,
+            'nombre': User.query.get(c.usuario_id).nombre if c.usuario_id else '',
+            'email': User.query.get(c.usuario_id).email if c.usuario_id else '',
+            'direccion': c.direccion,
+            'telefono': c.telefono,
+            'nit': c.nit
+        } for c in clientes]
+        return jsonify({'success': True, 'clientes': data})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/clientes/<int:cid>', methods=['GET'])
+def get_cliente(cid):
+    from models import Cliente, User
+    c = Cliente.query.get(cid)
+    if not c:
+        return jsonify({'success': False, 'message': 'Cliente no encontrado'}), 404
+    usuario = User.query.get(c.usuario_id) if c.usuario_id else None
+    return jsonify({
+        'success': True,
+        'cliente': {
+            'id': c.id,
+            'usuario_id': c.usuario_id,
+            'nombre': usuario.nombre if usuario else '',
+            'email': usuario.email if usuario else '',
+            'direccion': c.direccion,
+            'telefono': c.telefono,
+            'nit': c.nit
+        }
+    })
+
+@app.route('/api/clientes', methods=['POST'])
+def create_cliente():
+    try:
+        from models import Cliente, User
+        payload = request.get_json()
+        
+        # Crear usuario primero si viene email
+        usuario_id = None
+        if payload.get('email'):
+            usuario = User(
+                nombre=payload.get('nombre', ''),
+                email=payload.get('email'),
+                rol_id=2,  # rol usuario normal
+                activo=True
+            )
+            usuario.set_password('cliente123')  # Password temporal
+            usuario.temp_password = True
+            db.session.add(usuario)
+            db.session.flush()
+            usuario_id = usuario.id
+        
+        c = Cliente(
+            usuario_id=usuario_id,
+            direccion=payload.get('direccion'),
+            telefono=payload.get('telefono'),
+            nit=payload.get('nit')
+        )
+        db.session.add(c)
+        db.session.commit()
+        return jsonify({'success': True, 'id': c.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/clientes/<int:cid>', methods=['PUT'])
+def update_cliente(cid):
+    try:
+        from models import Cliente, User
+        c = Cliente.query.get(cid)
+        if not c:
+            return jsonify({'success': False, 'message': 'Cliente no encontrado'}), 404
+        
+        payload = request.get_json()
+        
+        # Actualizar usuario si existe
+        if c.usuario_id and payload.get('nombre'):
+            usuario = User.query.get(c.usuario_id)
+            if usuario:
+                usuario.nombre = payload.get('nombre')
+        
+        for field in ['direccion', 'telefono', 'nit']:
+            if field in payload:
+                setattr(c, field, payload.get(field))
+        
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/clientes/<int:cid>', methods=['DELETE'])
+def delete_cliente(cid):
+    try:
+        from models import Cliente, User
+        c = Cliente.query.get(cid)
+        if not c:
+            return jsonify({'success': False, 'message': 'Cliente no encontrado'}), 404
+        
+        # Opcional: eliminar usuario asociado
+        if c.usuario_id:
+            usuario = User.query.get(c.usuario_id)
+            if usuario:
+                db.session.delete(usuario)
+        
+        db.session.delete(c)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+    
 
 # =========================
 # ENDPOINTS DE ML Y RUTAS OPTIMIZADO PARA MÚLTIPLES PUNTOS
