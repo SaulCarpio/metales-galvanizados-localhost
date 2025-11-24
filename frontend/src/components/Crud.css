@@ -1,0 +1,229 @@
+/* --- Contenedor Principal del Módulo CRUD --- */
+.crud-container {
+  padding: 24px;
+  background-color: #f8f9fa;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.crud-container h2 {
+  font-size: 24px;
+  font-weight: 600;
+  color: #343a40;
+  margin-bottom: 20px;
+  border-bottom: 2px solid #007bff;
+  padding-bottom: 8px;
+}
+
+/* --- Botón para Crear Nuevo Registro --- */
+.btn-new {
+  background-color: #28a745;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 5px;
+  font-weight: bold;
+  cursor: pointer;
+  margin-bottom: 20px;
+  transition: background-color 0.2s, transform 0.2s;
+}
+
+.btn-new:hover {
+  background-color: #218838;
+  transform: translateY(-2px);
+}
+
+/* --- Estilos para la Tabla --- */
+.table-wrapper {
+  overflow-x: auto; /* Permite scroll horizontal en pantallas pequeñas */
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table th, table td {
+  padding: 12px 15px;
+  text-align: left;
+  border-bottom: 1px solid #dee2e6;
+}
+
+table th {
+  background-color: #f8f9fa;
+  font-weight: 600;
+  color: #495057;
+  font-size: 14px;
+}
+
+table tbody tr:hover {
+  background-color: #f1f3f5;
+}
+
+/* --- Botones de Acciones en la Tabla --- */
+.btn-edit {
+  background-color: #ffc107;
+  color: #212529;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.btn-edit:hover {
+  background-color: #e0a800;
+}
+
+/* --- Estilos para el Modal (Formulario Emergente) --- */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background-color: white;
+  padding: 24px;
+  border-radius: 8px;
+  width: 90%;
+  max-width: 800px; /* Ancho máximo del modal */
+  box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+  max-height: 90vh; /* Altura máxima */
+  overflow-y: auto; /* Scroll si el contenido es muy largo */
+}
+
+.modal-content h3 {
+  margin-top: 0;
+  margin-bottom: 24px;
+  color: #343a40;
+}
+
+/* --- Estilos para el Formulario dentro del Modal --- */
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.form-group label {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #495057;
+  font-size: 14px;
+}
+
+.form-group input, .form-group select {
+  padding: 10px;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  font-size: 16px;
+  width: 100%;
+  box-sizing: border-box; /* Asegura que el padding no afecte el ancho */
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.btn-save {
+  background-color: #007bff;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 5px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.btn-cancel {
+  background-color: #6c757d;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 5px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+/* --- Insignias de Estado (Status Badges) --- */
+.status-badge {
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: bold;
+  color: white;
+  text-transform: capitalize;
+}
+
+.status-en-cotizacion { background-color: #6c757d; }
+.status-ordenado { background-color: #17a2b8; }
+.status-en-transito { background-color: #007bff; }
+.status-en-aduana { background-color: #ffc107; color: #212529; }
+.status-recibido { background-color: #28a745; }
+.status-cancelado { background-color: #dc3545; }
+.status-pendiente { background-color: #fd7e14; }
+.status-completado { background-color: #20c997; }
+
+/* --- Indicador de Carga --- */
+.loading {
+  font-size: 18px;
+  text-align: center;
+  padding: 40px;
+  color: #6c757d;
+}
+
+.actions-cell {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-view-pdf, .btn-delete {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.btn-view-pdf {
+  background-color: #17a2b8;
+  color: white;
+}
+.btn-view-pdf:hover {
+  background-color: #138496;
+}
+
+.btn-delete {
+  background-color: #dc3545;
+  color: white;
+}
+.btn-delete:hover {
+  background-color: #c82333;
+}

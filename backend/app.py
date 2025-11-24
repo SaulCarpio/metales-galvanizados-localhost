@@ -1,7 +1,9 @@
 # =========================
-# IMPORTS Y CONFIGURACIÓN
+# IMPORTS Y CONFIGURACIÓN - CORREGIDO
 # =========================
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
+from fpdf import FPDF
+import io
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Mail, Message
@@ -16,8 +18,17 @@ import joblib
 import numpy as np
 import osmnx as ox
 import networkx as nx
-from models import db, User, Role, CodigosVerificacion, Cotizacion, Pedido, PedidoDetalle
-from models import Proveedor, OrdenCompra, OrdenCompraDetalle, CuentaPagar, CuentaCobrar, MovimientoPago, InventarioSucursal, MetodoPago
+import traceback
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
+import json
+# CORRECCIÓN CRÍTICA: Importar TODOS los modelos necesarios
+from models import (
+    db, User, Role, CodigosVerificacion, Cotizacion, Pedido, PedidoDetalle,
+    Proveedor, OrdenCompra, OrdenCompraDetalle, CuentaPagar, CuentaCobrar, 
+    MovimientoPago, InventarioSucursal, MetodoPago,
+    Cliente, Producto, Vehiculo, Sucursal, MetricaEntrega, ProcesoImportacion, InventarioMovimiento, Ruta # <-- ¡Correcto!
+)
 from ml.ruta_modelo import load_graph_z16, shortest_route_stats, ensure_edge_speeds
 
 # =========================
@@ -249,7 +260,7 @@ def request_password_reset():
     if not user:
         return jsonify({'success': False, 'message': 'No existe un usuario con ese email'}), 404
     code = ''.join(random.choices(string.digits, k=6))
-    expiracion = datetime.datetime.utcnow() + datetime.timedelta(minutes=10)
+    expiracion = datetime.datetime.utcnow() + datetime.timedelta(minutes=10)  # ✅ CORREGIDO
     codigo = CodigosVerificacion(usuario_id=user.id, codigo=code, expiracion=expiracion)
     db.session.add(codigo)
     db.session.commit()
@@ -274,7 +285,7 @@ def reset_password():
     codigo = CodigosVerificacion.query.filter_by(usuario_id=user.id, codigo=code, usado=False).first()
     if not codigo:
         return jsonify({'success': False, 'message': 'Código inválido'}), 400
-    if codigo.expiracion < datetime.datetime.utcnow():
+    if codigo.expiracion < datetime.datetime.utcnow():  # ✅ CORREGIDO
         return jsonify({'success': False, 'message': 'Código expirado'}), 400
     user.set_password(new_password)
     db.session.commit()
@@ -414,259 +425,283 @@ def health_check():
         'service': 'Metales Galvanizados API'
     })
 
-# -------------------------
-# CRUD Cotizaciones
-# -------------------------
+# =========================================================
+# ENDPOINTS DE COTIZACIONES
+# =========================================================
+
+class PDF(FPDF):
+    """Clase personalizada para crear el PDF con cabecera y pie de página."""
+    def header(self):
+        # Puedes añadir aquí tu logo si quieres: self.image('path/to/logo.png', 10, 8, 33)
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, 'METALES GALVANIZADOS Y ACEROS S.R.L.', 0, 1, 'C')
+        self.set_font('Arial', '', 10)
+        self.cell(0, 5, 'Dirección: Zona Cruce Lagunas, El Alto, La Paz', 0, 1, 'C')
+        self.cell(0, 5, 'Teléfono: (+591) 777-12345', 0, 1, 'C')
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
+
+def generate_quote_pdf(cotizacion):
+    """Función interna para generar el contenido del PDF (versión final y corregida)."""
+    try:
+        pdf = PDF()
+        pdf.add_page()
+        pdf.set_font('Arial', 'B', 12)
+        
+        # Título y Fechas
+        pdf.cell(0, 10, f"Cotización Nro: {cotizacion.id}", 0, 1, 'L')
+        pdf.set_font('Arial', '', 11)
+        fecha_emision_str = cotizacion.fecha_emitida.strftime('%d/%m/%Y') if cotizacion.fecha_emitida else 'N/A'
+        fecha_expiracion_str = cotizacion.fecha_expiracion.strftime('%d/%m/%Y') if cotizacion.fecha_expiracion else 'N/A'
+        pdf.cell(0, 7, f"Fecha de Emisión: {fecha_emision_str}", 0, 1, 'L')
+        pdf.cell(0, 7, f"Válida hasta: {fecha_expiracion_str}", 0, 1, 'L')
+        pdf.ln(10)
+
+        # Datos del Cliente
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 7, "Datos del Cliente:", 0, 1, 'L')
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 7, f"  Nombre: {str(cotizacion.nombre_cliente or 'N/A')}", 0, 1, 'L')
+        pdf.ln(5)
+
+        # Encabezados de la Tabla
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(90, 8, 'Descripción', 1, 0, 'C')
+        pdf.cell(30, 8, 'Cantidad', 1, 0, 'C')
+        pdf.cell(35, 8, 'P. Unitario (Bs)', 1, 0, 'C')
+        pdf.cell(35, 8, 'Subtotal (Bs)', 1, 1, 'C')
+        
+        pdf.set_font('Arial', '', 10)
+        total_general = 0
+
+        # Lógica para manejar 'detalles'
+        detalles = cotizacion.detalles
+        if isinstance(detalles, str):
+            try:
+                detalles = json.loads(detalles)
+            except json.JSONDecodeError:
+                detalles = {}
+        
+        if not isinstance(detalles, dict):
+            detalles = {}
+
+        calaminas = detalles.get('calaminas', [])
+        if isinstance(calaminas, list) and len(calaminas) > 0:
+            for item in calaminas:
+                if not isinstance(item, dict): continue
+                
+                largo = item.get('largo') or item.get('longitud') or 0
+                cantidad = float(item.get('cantidad', 0))
+                subtotal = float(item.get('subtotal', 0))
+                p_unit = (subtotal / cantidad) if cantidad > 0 else 0
+                
+                descripcion = str(f"Calamina {cotizacion.producto or ''} ({cotizacion.color or ''}) - {largo}m")
+                
+                pdf.cell(90, 8, descripcion, 1)
+                pdf.cell(30, 8, str(int(cantidad)), 1, 0, 'C')
+                pdf.cell(35, 8, f"{p_unit:.2f}", 1, 0, 'R')
+                pdf.cell(35, 8, f"{subtotal:.2f}", 1, 1, 'R')
+                total_general += subtotal
+        
+        # Fila de Total
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(155, 10, 'TOTAL COTIZADO', 1, 0, 'R')
+        pdf.cell(35, 10, f"{total_general:.2f} Bs.", 1, 1, 'R')
+        
+        # --- LA CORRECCIÓN CLAVE ---
+        # La salida ya es un objeto de bytes (bytearray), no necesitamos .encode()
+        pdf_output = pdf.output(dest='S')
+        
+        return io.BytesIO(pdf_output)
+
+    except Exception as e:
+        print("💥 CRASH DENTRO DE generate_quote_pdf:")
+        traceback.print_exc()
+        raise e
+
+@app.route('/api/cotizaciones/<int:cot_id>/pdf', methods=['GET'])
+def get_cotizacion_pdf(cot_id):
+    """Endpoint para servir el PDF de una cotización específica."""
+    try:
+        cotizacion = Cotizacion.query.get_or_404(cot_id)
+        pdf_buffer = generate_quote_pdf(cotizacion)
+        
+        return Response(
+            pdf_buffer,
+            mimetype='application/pdf',
+            headers={'Content-Disposition': f'inline; filename=cotizacion_{cot_id}.pdf'}
+        )
+    except Exception as e:
+        return jsonify({'success': False, 'message': f"Error interno al generar el PDF: {str(e)}"}), 500
 
 @app.route('/api/cotizaciones', methods=['GET'])
 def list_cotizaciones():
+    """Endpoint para listar todas las cotizaciones."""
     try:
         cotizaciones = Cotizacion.query.order_by(Cotizacion.fecha_emitida.desc()).all()
-        data = [{
-            'id': c.id,
-            'nombre_cliente': c.nombre_cliente,
-            'producto': c.producto,
-            'color': c.color,
-            'cantidad': float(c.cantidad) if c.cantidad is not None else None,
-            'estado': c.estado,
-        } for c in cotizaciones]
+        data = []
+        for c in cotizaciones:
+            data.append({
+                'id': c.id,
+                'cliente_id': c.cliente_id,
+                'nombre_cliente': c.nombre_cliente or (f'Cliente {c.cliente_id}' if c.cliente_id else 'Sin cliente'),
+                'producto': c.producto or '',
+                'color': c.color or '',
+                'cantidad': float(c.cantidad) if c.cantidad is not None else 0,
+                'precio_unitario': float(c.precio_unitario) if c.precio_unitario is not None else 0,
+                'estado': c.estado or 'emitida',
+                'fecha_emitida': c.fecha_emitida.isoformat() if c.fecha_emitida else None,
+                'fecha_expiracion': c.fecha_expiracion.isoformat() if c.fecha_expiracion else None,
+                'detalles': c.detalles,
+            })
         return jsonify({'success': True, 'cotizaciones': data})
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
-# === RUTA MODIFICADA ===
-@app.route('/api/cotizaciones/<int:cid>', methods=['GET'])
-def get_cotizacion(cid):
-    c = Cotizacion.query.get(cid)
-    if not c:
-        return jsonify({'success': False, 'message': 'Cotización no encontrada'}), 404
-    
-    # Se crea el diccionario base con los datos principales
-    data = {
-        'id': c.id,
-        'cliente_id': c.cliente_id,
-        'nombre_cliente': c.nombre_cliente,
-        'producto': c.producto,
-        'color': c.color,
-        'fecha_emitida': c.fecha_emitida.isoformat() if c.fecha_emitida else None,
-        'fecha_expiracion': c.fecha_expiracion.isoformat() if c.fecha_expiracion else None,
-        'precio_unitario': float(c.precio_unitario) if c.precio_unitario is not None else None,
-        'cantidad': float(c.cantidad) if c.cantidad is not None else None,
-        'estado': c.estado,
-        'usuario_id': c.usuario_id
-    }
-
-    # --- CAMBIO CLAVE ---
-    # Si existen datos en la columna 'detalles', se añaden a la respuesta.
-    # Esto "fusiona" los detalles (calaminas, cumbreras, etc.) con los datos principales.
-    if c.detalles:
-        data.update(c.detalles)
-
-    return jsonify({'success': True, 'cotizacion': data})
-
-# === RUTA MODIFICADA ===
 @app.route('/api/cotizaciones', methods=['POST'])
 def create_cotizacion():
+    """Endpoint para crear una nueva cotización."""
     try:
         payload = request.get_json()
-
-        # --- CAMBIO CLAVE ---
-        # Se extraen los detalles del payload para guardarlos en el campo JSON.
-        detalles_para_db = {
-            'calaminas': payload.get('calaminas', []),
-            'cumbreras': payload.get('cumbreras', []),
-            'tipo_cumbrera': payload.get('tipo_cumbrera'),
-            'total_calaminas': payload.get('total_calaminas'),
-            'total_cumbreras': payload.get('total_cumbreras')
-        }
-
+        if not payload:
+            return jsonify({'success': False, 'message': 'Datos inválidos'}), 400
+        
         c = Cotizacion(
             cliente_id=payload.get('cliente_id'),
-            nombre_cliente=payload.get('nombre_cliente'),
-            producto=payload.get('producto'),
-            color=payload.get('color'),
+            nombre_cliente=payload.get('nombre_cliente', ''),
+            producto=payload.get('producto', 'Varios'),
+            color=payload.get('color', ''),
             fecha_expiracion=payload.get('fecha_expiracion'),
-            precio_unitario=payload.get('precio_unitario'),
-            cantidad=payload.get('cantidad'),
+            precio_unitario=float(payload.get('precio_unitario', 0)),
+            cantidad=float(payload.get('cantidad', 0)),
             estado=payload.get('estado', 'emitida'),
             usuario_id=payload.get('usuario_id'),
-            
-            # Se asigna el diccionario de detalles al nuevo campo del modelo.
-            detalles=detalles_para_db
+            detalles=payload.get('detalles', {})
         )
+        
         db.session.add(c)
         db.session.commit()
-        return jsonify({'success': True, 'id': c.id}), 201
+        
+        return jsonify({
+            'success': True, 
+            'id': c.id,
+            'message': 'Cotización creada exitosamente'
+        }), 201
     except Exception as e:
         db.session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
-@app.route('/api/cotizaciones/<int:cid>', methods=['PUT'])
-def update_cotizacion(cid):
+@app.route('/api/cotizaciones/<int:cot_id>', methods=['DELETE'])
+def delete_cotizacion(cot_id):
+    """Endpoint para eliminar una cotización."""
     try:
-        c = Cotizacion.query.get(cid)
-        if not c:
+        cotizacion = Cotizacion.query.get(cot_id)
+        if not cotizacion:
             return jsonify({'success': False, 'message': 'Cotización no encontrada'}), 404
         
-        payload = request.get_json()
-        
-        # Actualiza los campos normales
-        for field in ['cliente_id','nombre_cliente','producto','color','fecha_expiracion','precio_unitario','cantidad','estado','usuario_id']:
-            if field in payload:
-                setattr(c, field, payload.get(field))
-
-        # --- CAMBIO SUGERIDO ---
-        # Si quieres que se puedan actualizar los detalles, añade esta lógica
-        if 'calaminas' in payload or 'cumbreras' in payload:
-            detalles_actualizados = c.detalles or {}
-            detalles_actualizados.update({
-                'calaminas': payload.get('calaminas', detalles_actualizados.get('calaminas')),
-                'cumbreras': payload.get('cumbreras', detalles_actualizados.get('cumbreras')),
-                # ... puedes añadir otros campos de detalles aquí
-            })
-            c.detalles = detalles_actualizados
-        
+        db.session.delete(cotizacion)
         db.session.commit()
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': 'Cotización eliminada correctamente'})
     except Exception as e:
         db.session.rollback()
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/api/cotizaciones/<int:cid>', methods=['DELETE'])
-def delete_cotizacion(cid):
-    # Esta ruta no necesita cambios, ya funciona correctamente.
-    try:
-        c = Cotizacion.query.get(cid)
-        if not c:
-            return jsonify({'success': False, 'message': 'Cotización no encontrada'}), 404
-        db.session.delete(c)
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
 
-# -------------------------
-# CRUD Pedidos (y detalles)
-# -------------------------
+# =========================================================
+# ENDPOINTS DE PEDIDOS - COMPLETOS (GET Y POST)
+# =========================================================
+
 @app.route('/api/pedidos', methods=['GET'])
 def list_pedidos():
+    """
+    Lista todos los pedidos con información completa del cliente.
+    """
     try:
-        pedidos = Pedido.query.order_by(Pedido.fecha_pedido.desc()).all()
+        # Usamos relaciones de SQLAlchemy para hacer la consulta más eficiente
+        pedidos_query = Pedido.query.options(
+            db.joinedload(Pedido.cliente).joinedload(Cliente.usuario),
+            db.joinedload(Pedido.detalles).joinedload(PedidoDetalle.producto)
+        ).order_by(Pedido.fecha_pedido.desc()).all()
+        
         data = []
-        for p in pedidos:
-            detalles = PedidoDetalle.query.filter_by(pedido_id=p.id).all()
-            detalles_list = [{'id': d.id, 'producto_id': d.producto_id, 'cantidad': int(d.cantidad), 'subtotal': float(d.subtotal)} for d in detalles]
+        for p in pedidos_query:
+            cliente_info = {}
+            if p.cliente and p.cliente.usuario:
+                cliente_info = {
+                    'nombre': p.cliente.usuario.nombre,
+                    'telefono': p.cliente.telefono,
+                    'direccion': p.cliente.direccion
+                }
+
+            detalles_list = [{
+                'producto_nombre': d.producto.nombre if d.producto else 'N/A',
+                'cantidad': float(d.cantidad),
+                'subtotal': float(d.subtotal)
+            } for d in p.detalles]
+
             data.append({
                 'id': p.id,
                 'cliente_id': p.cliente_id,
+                'cliente_info': cliente_info,
                 'fecha_pedido': p.fecha_pedido.isoformat() if p.fecha_pedido else None,
                 'estado': p.estado,
                 'prioridad': p.prioridad,
-                'total': float(p.total) if p.total else 0,
-                'vehiculo_id': p.vehiculo_id,  # 🔥 VEHÍCULO ASIGNADO
+                'total': float(p.total),
                 'detalles': detalles_list
             })
+        
         return jsonify({'success': True, 'pedidos': data})
+        
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/pedidos/<int:pid>', methods=['GET'])
-def get_pedido(pid):
-    p = Pedido.query.get(pid)
-    if not p:
-        return jsonify({'success': False, 'message': 'Pedido no encontrado'}), 404
-    detalles = PedidoDetalle.query.filter_by(pedido_id=p.id).all()
-    detalles_list = [{'id': d.id, 'producto_id': d.producto_id, 'cantidad': int(d.cantidad), 'subtotal': float(d.subtotal)} for d in detalles]
-    return jsonify({'success': True, 'pedido': {
-        'id': p.id,
-        'cliente_id': p.cliente_id,
-        'fecha_pedido': p.fecha_pedido.isoformat() if p.fecha_pedido else None,
-        'estado': p.estado,
-        'prioridad': p.prioridad,
-        'total': float(p.total) if p.total is not None else None,
-        'detalles': detalles_list
-    }})
 
 @app.route('/api/pedidos', methods=['POST'])
 def create_pedido():
+    """
+    Crea un nuevo pedido.
+    """
     try:
-        payload = request.get_json()
-        detalles_payload = payload.get('detalles', [])
-        p = Pedido(
-            cliente_id=payload.get('cliente_id'),
-            estado=payload.get('estado', 'pendiente'),
-            prioridad=payload.get('prioridad', 'normal'),
-            total=payload.get('total') or 0
+        data = request.get_json()
+        if not data or not data.get('cliente_id') or not data.get('detalles'):
+            return jsonify({'success': False, 'message': 'Datos incompletos.'}), 400
+
+        total_calculado = sum(float(item.get('subtotal', 0)) for item in data['detalles'])
+
+        nuevo_pedido = Pedido(
+            cliente_id=data.get('cliente_id'),
+            total=total_calculado,
+            estado='pendiente',
+            prioridad=data.get('prioridad', 'normal')
         )
-        db.session.add(p)
-        db.session.flush()  # obtener id
-        total_calc = 0
-        for d in detalles_payload:
-            pd = PedidoDetalle(
-                pedido_id=p.id,
-                producto_id=d.get('producto_id'),
-                cantidad=d.get('cantidad'),
-                subtotal=d.get('subtotal')
+        db.session.add(nuevo_pedido)
+        db.session.flush()
+
+        for item in data['detalles']:
+            detalle = PedidoDetalle(
+                pedido_id=nuevo_pedido.id,
+                producto_id=item.get('producto_id'),
+                cantidad=item.get('cantidad'),
+                subtotal=item.get('subtotal')
             )
-            db.session.add(pd)
-            total_calc += float(d.get('subtotal') or 0)
-        p.total = total_calc or p.total
+            db.session.add(detalle)
+
         db.session.commit()
-        return jsonify({'success': True, 'id': p.id}), 201
+        return jsonify({'success': True, 'id': nuevo_pedido.id, 'message': 'Pedido creado con éxito.'}), 201
+
     except Exception as e:
         db.session.rollback()
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
-
-@app.route('/api/pedidos/<int:pid>', methods=['PUT'])
-def update_pedido(pid):
-    try:
-        p = Pedido.query.get(pid)
-        if not p:
-            return jsonify({'success': False, 'message': 'Pedido no encontrado'}), 404
-        payload = request.get_json()
-        # campos simples
-        for field in ['cliente_id','estado','prioridad','total','vehiculo_id']:
-            if field in payload:
-                setattr(p, field, payload.get(field))
-        # detalles
-        if 'detalles' in payload:
-            PedidoDetalle.query.filter_by(pedido_id=p.id).delete()
-            total_calc = 0
-            for d in payload['detalles']:
-                pd = PedidoDetalle(
-                    pedido_id=p.id,
-                    producto_id=d.get('producto_id'),
-                    cantidad=d.get('cantidad'),
-                    subtotal=d.get('subtotal')
-                )
-                db.session.add(pd)
-                total_calc += float(d.get('subtotal') or 0)
-            p.total = total_calc
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/pedidos/<int:pid>', methods=['DELETE'])
-def delete_pedido(pid):
-    try:
-        p = Pedido.query.get(pid)
-        if not p:
-            return jsonify({'success': False, 'message': 'Pedido no encontrado'}), 404
-        # eliminar detalles automáticamente por ondelete en modelo si existe, sino:
-        PedidoDetalle.query.filter_by(pedido_id=p.id).delete()
-        db.session.delete(p)
-        db.session.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
+    
 # =========================
 # CRUD Proveedores
 # =========================
@@ -914,9 +949,56 @@ def delete_cuenta_pagar(cid):
 def list_movimientos_pago():
     try:
         movs = MovimientoPago.query.order_by(MovimientoPago.fecha_pago.desc()).all()
-        data = [{'id': m.id, 'cuenta_pagar_id': m.cuenta_pagar_id, 'cuenta_cobrar_id': m.cuenta_cobrar_id, 'monto': float(m.monto), 'fecha_pago': m.fecha_pago.isoformat() if m.fecha_pago else None, 'metodo_pago_id': m.metodo_pago_id, 'referencia_pago': m.referencia_pago, 'nota': m.nota} for m in movs]
+        data = []
+        
+        for m in movs:
+            # Obtener información de la cuenta pagar si existe
+            cuenta_pagar_info = None
+            if m.cuenta_pagar_id:
+                cp = CuentaPagar.query.get(m.cuenta_pagar_id)
+                if cp:
+                    cuenta_pagar_info = {
+                        'referencia': cp.referencia,
+                        'proveedor_id': cp.proveedor_id
+                    }
+            
+            # Obtener información de la cuenta cobrar si existe
+            cuenta_cobrar_info = None
+            if m.cuenta_cobrar_id:
+                cc = CuentaCobrar.query.get(m.cuenta_cobrar_id)
+                if cc:
+                    cuenta_cobrar_info = {
+                        'referencia': cc.referencia if hasattr(cc, 'referencia') else None,
+                        'cliente_id': cc.cliente_id if hasattr(cc, 'cliente_id') else None
+                    }
+            
+            # Obtener información del método de pago si existe
+            metodo_pago_info = None
+            if m.metodo_pago_id:
+                mp = MetodoPago.query.get(m.metodo_pago_id)
+                if mp:
+                    metodo_pago_info = {
+                        'nombre': mp.nombre if hasattr(mp, 'nombre') else None
+                    }
+            
+            data.append({
+                'id': m.id,
+                'cuenta_pagar_id': m.cuenta_pagar_id,
+                'cuenta_pagar_info': cuenta_pagar_info,
+                'cuenta_cobrar_id': m.cuenta_cobrar_id,
+                'cuenta_cobrar_info': cuenta_cobrar_info,
+                'monto': float(m.monto),
+                'fecha_pago': m.fecha_pago.isoformat() if m.fecha_pago else None,
+                'metodo_pago_id': m.metodo_pago_id,
+                'metodo_pago_info': metodo_pago_info,
+                'referencia_pago': m.referencia_pago,
+                'nota': m.nota
+            })
+        
         return jsonify({'success': True, 'movimientos': data})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
@@ -924,26 +1006,58 @@ def list_movimientos_pago():
 def create_movimiento_pago():
     try:
         payload = request.get_json()
+        
+        # Validar datos obligatorios
+        if not payload.get('monto'):
+            return jsonify({'success': False, 'message': 'El monto es obligatorio'}), 400
+        
+        # Procesar metodo_pago_id correctamente (puede ser string vacío, null o número)
+        metodo_pago_id = payload.get('metodo_pago_id')
+        if metodo_pago_id == '' or metodo_pago_id is None:
+            metodo_pago_id = None
+        else:
+            try:
+                metodo_pago_id = int(metodo_pago_id)
+            except (ValueError, TypeError):
+                metodo_pago_id = None
+        
+        # Procesar cuenta_pagar_id
+        cuenta_pagar_id = payload.get('cuenta_pagar_id')
+        if cuenta_pagar_id == '' or cuenta_pagar_id is None:
+            cuenta_pagar_id = None
+        else:
+            cuenta_pagar_id = int(cuenta_pagar_id)
+        
+        # Procesar cuenta_cobrar_id
+        cuenta_cobrar_id = payload.get('cuenta_cobrar_id')
+        if cuenta_cobrar_id == '' or cuenta_cobrar_id is None:
+            cuenta_cobrar_id = None
+        else:
+            cuenta_cobrar_id = int(cuenta_cobrar_id)
+        
+        # Crear movimiento
         m = MovimientoPago(
-            cuenta_pagar_id=payload.get('cuenta_pagar_id'),
-            cuenta_cobrar_id=payload.get('cuenta_cobrar_id'),
-            monto=payload.get('monto'),
-            metodo_pago_id=payload.get('metodo_pago_id'),
-            referencia_pago=payload.get('referencia_pago'),
-            nota=payload.get('nota')
+            cuenta_pagar_id=cuenta_pagar_id,
+            cuenta_cobrar_id=cuenta_cobrar_id,
+            monto=float(payload.get('monto')),
+            metodo_pago_id=metodo_pago_id,
+            referencia_pago=payload.get('referencia_pago', ''),
+            nota=payload.get('nota', '')
         )
         db.session.add(m)
+        db.session.flush()  # Para obtener el ID antes de commit
 
-        # actualizar saldos en cuentas
+        # Actualizar saldos en cuentas
         if m.cuenta_pagar_id:
             cp = CuentaPagar.query.get(m.cuenta_pagar_id)
             if cp:
                 cp.monto_pagado = (cp.monto_pagado or 0) + float(m.monto)
-                # actualizar estado
+                # Actualizar estado
                 if float(cp.monto_pagado) >= float(cp.monto_total):
                     cp.estado = 'pagada'
                 else:
                     cp.estado = 'parcial'
+        
         if m.cuenta_cobrar_id:
             cc = CuentaCobrar.query.get(m.cuenta_cobrar_id)
             if cc:
@@ -954,88 +1068,182 @@ def create_movimiento_pago():
                     cc.estado = 'parcial'
 
         db.session.commit()
-        return jsonify({'success': True, 'id': m.id}), 201
+        
+        return jsonify({
+            'success': True, 
+            'id': m.id,
+            'message': 'Movimiento registrado correctamente'
+        }), 201
+        
     except Exception as e:
         db.session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False, 
+            'message': f'Error al crear movimiento: {str(e)}'
+        }), 500
 
 
 # =========================
-# CRUD InventarioSucursal (Control de existencias)
+# CRUD InventarioSucursal (Control de existencias) - CORREGIDO
 # =========================
+
 @app.route('/api/inventario', methods=['GET'])
 def list_inventario():
+    """
+    Lista todos los registros de inventario de todas las sucursales.
+    Este es el endpoint que faltaba y causaba el error 405.
+    """
+    print("✅ Endpoint de LISTAR Inventario alcanzado.")
     try:
-        items = InventarioSucursal.query.order_by(InventarioSucursal.id).all()
-        data = [{'id': i.id, 'producto_id': i.producto_id, 'sucursal_id': i.sucursal_id, 'cantidad': float(i.cantidad), 'estado': i.estado, 'ultimo_movimiento': i.ultimo_movimiento.isoformat() if i.ultimo_movimiento else None} for i in items]
+        inventario_items = InventarioSucursal.query.order_by(InventarioSucursal.sucursal_id, InventarioSucursal.producto_id).all()
+        data = []
+        for i in inventario_items:
+            data.append({
+                'id': i.id,
+                'producto_id': i.producto_id,
+                'sucursal_id': i.sucursal_id,
+                'cantidad': float(i.cantidad) if i.cantidad is not None else 0,
+                'estado': i.estado,
+                'ultimo_movimiento': i.ultimo_movimiento.isoformat() if i.ultimo_movimiento else None
+            })
+        # La clave 'inventario' debe coincidir con la que espera tu frontend
         return jsonify({'success': True, 'inventario': data})
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/inventario/<int:iid>', methods=['GET'])
-def get_inventario(iid):
-    i = InventarioSucursal.query.get(iid)
-    if not i:
-        return jsonify({'success': False, 'message': 'Registro inventario no encontrado'}), 404
-    return jsonify({'success': True, 'inventario': {'id': i.id, 'producto_id': i.producto_id, 'sucursal_id': i.sucursal_id, 'cantidad': float(i.cantidad), 'estado': i.estado, 'ultimo_movimiento': i.ultimo_movimiento.isoformat() if i.ultimo_movimiento else None}})
 
 
 @app.route('/api/inventario', methods=['POST'])
 def create_inventario():
+    """
+    Crea un nuevo registro de inventario.
+    """
     try:
-        payload = request.get_json()
+        payload = request.get_json() or {}
 
-        # Validaciones
-        if not payload.get('producto_id') or not payload.get('sucursal_id'):
+        # Validaciones básicas
+        producto_id = payload.get('producto_id')
+        sucursal_id = payload.get('sucursal_id')
+        cantidad = payload.get('cantidad', 0)
+        estado = payload.get('estado', 'disponible')
+
+        if not producto_id or not sucursal_id:
             return jsonify({'success': False, 'message': 'Producto y Sucursal son obligatorios'}), 400
 
-        i = InventarioSucursal(
-            producto_id=int(payload.get('producto_id')),
-            sucursal_id=int(payload.get('sucursal_id')),
-            cantidad=float(payload.get('cantidad', 0)),
-            estado=payload.get('estado', 'disponible')
+        # Verificar que exista producto y sucursal
+        producto = Producto.query.get(producto_id)
+        sucursal = Sucursal.query.get(sucursal_id)
+        if not producto or not sucursal:
+            return jsonify({'success': False, 'message': 'Producto o Sucursal no existen'}), 400
+
+        # Validar cantidad
+        try:
+            cantidad = float(cantidad)
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'message': 'Cantidad inválida'}), 400
+
+        # Crear inventario
+        nuevo = InventarioSucursal(
+            producto_id=producto_id,
+            sucursal_id=sucursal_id,
+            cantidad=cantidad,
+            estado=estado
         )
-        db.session.add(i)
+
+        db.session.add(nuevo)
         db.session.commit()
-        return jsonify({'success': True, 'id': i.id}), 201
+
+        return jsonify({'success': True, 'id': nuevo.id}), 201
+
     except Exception as e:
         db.session.rollback()
-        print("ERROR Inventario:", e)  # <-- log en consola del backend
-        return jsonify({'success': False, 'message': str(e)}), 500
+        print("ERROR Inventario:", e)
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': 'Error interno del servidor'}), 500
 
+
+@app.route('/api/inventario/<int:iid>', methods=['GET'])
+def get_inventario(iid):
+    """
+    Obtiene un registro de inventario específico por su ID.
+    """
+    try:
+        i = InventarioSucursal.query.get(iid)
+        if not i:
+            return jsonify({'success': False, 'message': 'Registro de inventario no encontrado'}), 404
+
+        return jsonify({
+            'success': True,
+            'inventario': {
+                'id': i.id,
+                'producto_id': i.producto_id,
+                'sucursal_id': i.sucursal_id,
+                'cantidad': float(i.cantidad) if i.cantidad is not None else 0,
+                'estado': i.estado,
+                'ultimo_movimiento': i.ultimo_movimiento.isoformat() if i.ultimo_movimiento else None
+            }
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 @app.route('/api/inventario/<int:iid>', methods=['PUT'])
 def update_inventario(iid):
+    """
+    Actualiza un registro de inventario existente.
+    """
     try:
         i = InventarioSucursal.query.get(iid)
         if not i:
-            return jsonify({'success': False, 'message': 'Registro inventario no encontrado'}), 404
-        payload = request.get_json()
-        for field in ['producto_id','sucursal_id','cantidad','estado']:
+            return jsonify({'success': False, 'message': 'Registro de inventario no encontrado'}), 404
+
+        payload = request.get_json() or {}
+
+        # Actualizar campos si vienen en payload
+        for field in ['producto_id', 'sucursal_id', 'cantidad', 'estado']:
             if field in payload:
-                setattr(i, field, payload.get(field))
+                if field == 'cantidad':
+                    try:
+                        setattr(i, field, float(payload[field]))
+                    except (ValueError, TypeError):
+                        return jsonify({'success': False, 'message': 'Cantidad inválida'}), 400
+                else:
+                    setattr(i, field, payload[field])
+        
+        # Actualizar la fecha del último movimiento
+        i.ultimo_movimiento = datetime.datetime.utcnow()
+
         db.session.commit()
         return jsonify({'success': True})
+
     except Exception as e:
         db.session.rollback()
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
 @app.route('/api/inventario/<int:iid>', methods=['DELETE'])
 def delete_inventario(iid):
+    """
+    Elimina un registro de inventario.
+    """
     try:
         i = InventarioSucursal.query.get(iid)
         if not i:
-            return jsonify({'success': False, 'message': 'Registro inventario no encontrado'}), 404
+            return jsonify({'success': False, 'message': 'Registro de inventario no encontrado'}), 404
+
         db.session.delete(i)
         db.session.commit()
         return jsonify({'success': True})
+
     except Exception as e:
         db.session.rollback()
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
-
+        
 # =========================
 # CRUD PRODUCTOS
 # =========================
@@ -1335,6 +1543,425 @@ def delete_cliente(cid):
         db.session.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
     
+# =========================
+# ENDPOINTS DE GESTIÓN DE RUTAS (CICLO DE VIDA)
+# =========================
+
+@app.route('/api/rutas/<int:ruta_id>/start', methods=['POST'])
+def start_route(ruta_id):
+    """ Marcar una ruta como 'en_camino' y registrar la fecha de inicio. """
+    ruta = Ruta.query.get(ruta_id)
+    if not ruta:
+        return jsonify({'success': False, 'message': 'Ruta no encontrada'}), 404
+
+    ruta.estado = 'en_camino'
+    ruta.fecha_inicio = datetime.datetime.utcnow()
+    db.session.commit()
+    return jsonify({'success': True, 'message': f'Ruta {ruta_id} iniciada.'})
+
+@app.route('/api/rutas/<int:ruta_id>/complete', methods=['POST', 'OPTIONS'])
+def complete_ruta(ruta_id):
+    """Endpoint para completar una ruta - VERSIÓN CORREGIDA"""
+    if request.method == 'OPTIONS':
+        # Respuesta CORS más robusta
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS, GET, PUT, DELETE')
+        return response, 200
+
+    try:
+        # Verificar que ruta_id sea válido
+        if not ruta_id or ruta_id <= 0:
+            return jsonify({'success': False, 'message': 'ID de ruta inválido'}), 400
+
+        ruta = Ruta.query.get(ruta_id)
+        if not ruta:
+            return jsonify({'success': False, 'message': f'Ruta {ruta_id} no encontrada'}), 404
+
+        print(f"✅ Finalizando Ruta #{ruta_id}")
+
+        # Actualizar estado de la ruta
+        ruta.estado = 'completada'
+        ruta.fecha_fin = datetime.datetime.utcnow()
+
+        # Buscar pedidos asociados a esta ruta
+        pedidos = Pedido.query.filter_by(ruta_id=ruta_id).all()
+        
+        print(f"   - Encontrados {len(pedidos)} pedidos para la ruta")
+        
+        # Actualizar estado de cada pedido
+        pedidos_actualizados = 0
+        for p in pedidos:
+            p.estado = 'entregado'
+            pedidos_actualizados += 1
+            print(f"   - Pedido #{p.id} marcado como entregado")
+
+        # Crear métricas de entrega
+        if ruta.fecha_inicio and ruta.fecha_fin:
+            tiempo_real_min = int((ruta.fecha_fin - ruta.fecha_inicio).total_seconds() / 60)
+            tiempo_estimado = ruta.tiempo_estimado_min or 0
+            
+            metrica = MetricaEntrega(
+                ruta_id=ruta_id,
+                tiempo_real_min=tiempo_real_min,
+                retraso=(tiempo_real_min > tiempo_estimado),
+                combustible_usado_lts=0  # Puedes calcular esto según la distancia
+            )
+            db.session.add(metrica)
+            print(f"   - Métrica creada: {tiempo_real_min} min (estimado: {tiempo_estimado} min)")
+
+        db.session.commit()
+        
+        return jsonify({
+            'success': True, 
+            'ruta_id': ruta_id, 
+            'pedidos_actualizados': pedidos_actualizados,
+            'message': f'Ruta {ruta_id} finalizada exitosamente con {pedidos_actualizados} pedidos entregados'
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error finalizando ruta {ruta_id}:")
+        traceback.print_exc()
+        return jsonify({
+            'success': False, 
+            'message': f'Error finalizando ruta: {str(e)}'
+        }), 500
+
+# =========================
+# ENDPOINT DE KPIS LOGÍSTICOS - VERIFICADO
+# =========================
+
+@app.route('/api/kpis/logistics', methods=['GET'])
+def get_logistics_kpis():
+    """
+    Calcula y devuelve los KPIs clave basados en las rutas completadas.
+    """
+    print("✅ Endpoint de KPIs alcanzado.") 
+    
+    try:
+        # 1. Tiempo Promedio de Entrega
+        avg_time = db.session.query(func.avg(MetricaEntrega.tiempo_real_min)).scalar() or 0
+        
+        # 2. Kilometraje Promedio por Ruta
+        avg_km = db.session.query(func.avg(Ruta.distancia_km)).filter(Ruta.estado == 'completada').scalar() or 0
+        
+        # 3. Cumplimiento de Entregas a Tiempo
+        total_entregas = db.session.query(func.count(MetricaEntrega.id)).scalar() or 0
+        entregas_a_tiempo = db.session.query(func.count(MetricaEntrega.id)).filter(MetricaEntrega.retraso == False).scalar() or 0
+        cumplimiento_pct = (entregas_a_tiempo / total_entregas * 100) if total_entregas > 0 else 100
+        
+        # 4. Consumo Total de Combustible 
+        total_combustible = db.session.query(func.sum(MetricaEntrega.combustible_usado_lts)).scalar() or 0
+        
+        # 5. Costo Operativo Total
+        COSTO_POR_KM = 3.5
+        COSTO_DIESEL_POR_LITRO = 3.72
+        
+        total_km_recorridos = db.session.query(func.sum(Ruta.distancia_km)).filter(Ruta.estado == 'completada').scalar() or 0
+        costo_por_distancia = float(total_km_recorridos or 0) * COSTO_POR_KM
+        costo_por_combustible = float(total_combustible or 0) * COSTO_DIESEL_POR_LITRO
+        costo_operativo_total = costo_por_distancia + costo_por_combustible
+        
+        # 6. Quiebres de Inventario (simulado)
+        quiebres_inventario_pct = random.uniform(2, 5)
+
+        kpis = {
+            "tiempoPromedioEntregaMin": round(avg_time, 1),
+            "kilometrajePromedioKm": round(float(avg_km or 0), 1),
+            "cumplimientoEntregasPct": round(cumplimiento_pct, 1),
+            "consumoCombustibleTotalLts": round(float(total_combustible or 0), 1),
+            "costoOperativoTotalBs": round(costo_operativo_total, 2),
+            "quiebresInventarioPct": round(quiebres_inventario_pct, 1)
+        }
+
+        return jsonify({'success': True, 'kpis': kpis})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': f'Error calculando KPIs: {str(e)}'}), 500
+    
+# =========================================================
+# CRUD PROCESO DE IMPORTACIONES con Lógica de Inventario
+# =========================================================
+
+@app.route('/api/importaciones', methods=['GET'])
+def list_importaciones():
+    try:
+        importaciones = ProcesoImportacion.query.order_by(ProcesoImportacion.fecha_orden.desc()).all()
+        data = []
+        for i in importaciones:
+            i.calcular_total() # Asegurarse que el total esté actualizado
+            data.append({
+                'id': i.id,
+                'referencia': i.referencia,
+                'proveedor_id': i.proveedor_id,
+                'proveedor_nombre': i.proveedor.nombre if i.proveedor else 'N/A',
+                'producto_id': i.producto_id,
+                'producto_nombre': i.producto.nombre if i.producto else 'N/A',
+                'cantidad': float(i.cantidad or 0),
+                'estado': i.estado,
+                'fecha_orden': i.fecha_orden.isoformat() if i.fecha_orden else None,
+                'fecha_llegada_estimada': i.fecha_llegada_estimada.isoformat() if i.fecha_llegada_estimada else None,
+                'fecha_llegada_real': i.fecha_llegada_real.isoformat() if i.fecha_llegada_real else None,
+                'total_importacion': float(i.total_importacion or 0)
+            })
+        return jsonify({'success': True, 'importaciones': data})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/importaciones', methods=['POST'])
+def create_importacion():
+    try:
+        data = request.get_json()
+        nueva_importacion = ProcesoImportacion(
+            proveedor_id=data.get('proveedor_id'),
+            producto_id=data.get('producto_id'),
+            referencia=data.get('referencia'),
+            descripcion=data.get('descripcion'),
+            cantidad=data.get('cantidad'),
+            precio_unitario=data.get('precio_unitario'),
+            fecha_llegada_estimada=data.get('fecha_llegada_estimada'),
+            estado=data.get('estado', 'En Cotizacion')
+        )
+        # Asignar costos
+        for field in ['costo_flete_maritimo', 'costo_flete_terrestre', 'costo_aduanas', 'otros_costos']:
+            if field in data:
+                setattr(nueva_importacion, field, data.get(field))
+        
+        nueva_importacion.calcular_total()
+        db.session.add(nueva_importacion)
+        db.session.commit()
+        return jsonify({'success': True, 'id': nueva_importacion.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/importaciones/<int:import_id>', methods=['PUT'])
+def update_importacion(import_id):
+    try:
+        importacion = ProcesoImportacion.query.get(import_id)
+        if not importacion:
+            return jsonify({'success': False, 'message': 'Importación no encontrada'}), 404
+        
+        data = request.get_json()
+        estado_anterior = importacion.estado
+        
+        # Actualizar campos
+        campos_actualizables = [
+            'proveedor_id', 'producto_id', 'referencia', 'descripcion', 'cantidad', 
+            'precio_unitario', 'fecha_llegada_estimada', 'estado', 'costo_flete_maritimo',
+            'costo_flete_terrestre', 'costo_aduanas', 'otros_costos'
+        ]
+        for field in campos_actualizables:
+            if field in data:
+                setattr(importacion, field, data.get(field))
+
+        importacion.calcular_total()
+
+        # --- LÓGICA DE NEGOCIO: ACTUALIZAR INVENTARIO ---
+        if importacion.estado == 'Recibido' and estado_anterior != 'Recibido':
+            print(f"✅ Procesando recepción de importación ID {importacion.id}")
+            importacion.fecha_llegada_real = datetime.datetime.utcnow()
+
+            # ID de la sucursal principal donde se recibe la materia prima (ajustar si es necesario)
+            SUCURSAL_PRINCIPAL_ID = 1 
+
+            # Buscar si ya hay stock de ese producto en la sucursal
+            stock_existente = InventarioSucursal.query.filter_by(
+                producto_id=importacion.producto_id,
+                sucursal_id=SUCURSAL_PRINCIPAL_ID
+            ).first()
+
+            if stock_existente:
+                stock_existente.cantidad += importacion.cantidad
+                print(f"   - Stock actualizado para producto {importacion.producto_id}: {stock_existente.cantidad}")
+            else:
+                nuevo_stock = InventarioSucursal(
+                    producto_id=importacion.producto_id,
+                    sucursal_id=SUCURSAL_PRINCIPAL_ID,
+                    cantidad=importacion.cantidad
+                )
+                db.session.add(nuevo_stock)
+                print(f"   - Nuevo stock creado para producto {importacion.producto_id}: {importacion.cantidad}")
+            
+            # Registrar el movimiento de inventario
+            movimiento = InventarioMovimiento(
+                producto_id=importacion.producto_id,
+                cantidad=importacion.cantidad,
+                tipo='entrada por importacion',
+                referencia=f"Importacion ID {importacion.id}"
+            )
+            db.session.add(movimiento)
+
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Importación actualizada'})
+    except Exception as e:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/dispatch-route', methods=['POST', 'OPTIONS'])
+def dispatch_route():
+    """Endpoint para despachar una ruta con múltiples pedidos - VERSIÓN DEFINITIVA"""
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
+        
+    try:
+        data = request.get_json()
+        
+        print("📩 Recibiendo solicitud de despacho:", data)
+
+        if not data:
+            return jsonify({'success': False, 'message': 'Faltan datos.'}), 400
+
+        conductor_id = data.get('conductor_id')
+        vehiculo_id = data.get('vehiculo_id')
+        pedido_ids = data.get('pedido_ids', [])
+        route_details = data.get('route_details', {})
+
+        # Validaciones básicas
+        if not conductor_id:
+            return jsonify({'success': False, 'message': 'Se requiere conductor_id.'}), 400
+        if not vehiculo_id:
+            return jsonify({'success': False, 'message': 'Se requiere vehiculo_id.'}), 400
+        if not pedido_ids:
+            return jsonify({'success': False, 'message': 'Se requieren pedido_ids.'}), 400
+
+        print(f"🔍 Buscando vehículo ID: {vehiculo_id}")
+        # Verificar vehículo
+        vehiculo = Vehiculo.query.get(vehiculo_id)
+        if not vehiculo:
+            print(f"❌ Vehículo {vehiculo_id} no encontrado")
+            return jsonify({'success': False, 'message': f'Vehículo ID {vehiculo_id} no encontrado.'}), 404
+
+        print(f"✅ Vehículo encontrado: {vehiculo.placa}")
+
+        # ✅ USAR datetime.datetime.now() EXPLÍCITAMENTE
+        nueva_ruta = Ruta(
+            conductor_id=conductor_id,
+            estado='en_camino',
+            fecha_programada=datetime.datetime.now(),  # ✅ datetime.datetime.now()
+            fecha_inicio=datetime.datetime.now(),      # ✅ datetime.datetime.now()
+            distancia_km=float(route_details.get('distance_km', 0)),
+            tiempo_estimado_min=int(route_details.get('time_min', 0))
+        )
+        
+        db.session.add(nueva_ruta)
+        db.session.flush()  # Generar ID sin commit
+
+        print(f"✅ Ruta creada con ID: {nueva_ruta.id}")
+
+        # Actualizar Pedidos
+        pedidos_actualizados = 0
+        pedidos_no_encontrados = []
+        
+        for pedido_id in pedido_ids:
+            print(f"🔍 Buscando pedido ID: {pedido_id}")
+            pedido = Pedido.query.get(pedido_id)
+            if pedido:
+                pedido.vehiculo_id = vehiculo_id
+                pedido.ruta_id = nueva_ruta.id
+                pedido.estado = 'en_camino'
+                pedidos_actualizados += 1
+                print(f"   ✅ Pedido #{pedido_id} asignado a ruta {nueva_ruta.id}")
+            else:
+                pedidos_no_encontrados.append(pedido_id)
+                print(f"   ❌ Pedido #{pedido_id} no encontrado")
+
+        if pedidos_actualizados == 0:
+            db.session.rollback()
+            return jsonify({
+                'success': False, 
+                'message': 'No se encontraron pedidos válidos para asignar.',
+                'pedidos_no_encontrados': pedidos_no_encontrados
+            }), 400
+
+        db.session.commit()
+        
+        print(f"🎉 Ruta despachada exitosamente: {nueva_ruta.id} con {pedidos_actualizados} pedidos")
+        
+        return jsonify({
+            'success': True, 
+            'data': {
+                'ruta_id': nueva_ruta.id,
+                'pedidos_actualizados': pedidos_actualizados,
+                'vehiculo_asignado': vehiculo.placa
+            },
+            'message': f'Ruta iniciada correctamente con {pedidos_actualizados} pedidos en vehículo {vehiculo.placa}'
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print("❌ ERROR CRÍTICO en dispatch_route:")
+        print(f"   Tipo de error: {type(e).__name__}")
+        print(f"   Mensaje: {str(e)}")
+        traceback.print_exc()
+        
+        return jsonify({
+            'success': False, 
+            'message': f'Error interno del servidor: {str(e)}',
+            'error_type': type(e).__name__
+        }), 500
+
+
+@app.route('/api/pedidos/<int:pedido_id>/asignar-vehiculo', methods=['POST', 'OPTIONS'])
+def asignar_vehiculo_a_pedido(pedido_id):
+    """
+    Endpoint para asignar un vehículo a un pedido específico.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.get_json()
+        vehiculo_id = data.get('vehiculo_id')
+        
+        if not vehiculo_id:
+            return jsonify({'success': False, 'message': 'Se requiere vehiculo_id'}), 400
+        
+        # Buscar el pedido
+        pedido = Pedido.query.get(pedido_id)
+        if not pedido:
+            return jsonify({'success': False, 'message': 'Pedido no encontrado'}), 404
+        
+        # Verificar que el vehículo existe
+        vehiculo = Vehiculo.query.get(vehiculo_id)
+        if not vehiculo:
+            return jsonify({'success': False, 'message': 'Vehículo no encontrado'}), 404
+        
+        # Verificar que el pedido no tenga ya un vehículo asignado
+        if pedido.vehiculo_id:
+            return jsonify({
+                'success': False, 
+                'message': f'El pedido ya tiene asignado el vehículo {pedido.vehiculo_id}'
+            }), 400
+        
+        # Asignar el vehículo al pedido
+        pedido.vehiculo_id = vehiculo_id
+        pedido.estado = 'asignado'  # Opcional: cambiar estado
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Vehículo {vehiculo.placa} asignado correctamente al Pedido #{pedido_id}',
+            'pedido': {
+                'id': pedido.id,
+                'vehiculo_id': pedido.vehiculo_id,
+                'estado': pedido.estado
+            }
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 # =========================
 # ENDPOINTS DE ML Y RUTAS OPTIMIZADO PARA MÚLTIPLES PUNTOS

@@ -52,15 +52,16 @@ class User(db.Model):
 # =========================
 
 class Cliente(db.Model):
-    """
-    Perfil extendido para usuarios tipo cliente.
-    """
     __tablename__ = 'clientes'
     id = db.Column(db.Integer, primary_key=True)
     usuario_id = db.Column(db.Integer, db.ForeignKey('usuarios.id'), unique=True)
     direccion = db.Column(db.Text)
     telefono = db.Column(db.String(20))
     nit = db.Column(db.String(50))
+    
+    # --- AÑADE ESTA LÍNEA ---
+    # Esto crea la relación Cliente.usuario que se necesita en la consulta
+    usuario = db.relationship('User', backref='cliente')
 
 
 # =========================
@@ -112,21 +113,22 @@ class Producto(db.Model):
     activo = db.Column(db.Boolean, default=True)
 
 
-# =========================
-# PEDIDOS
-# =========================
-
 class Pedido(db.Model):
-    """
-    Pedido realizado por un cliente.
-    """
     __tablename__ = 'pedidos'
     id = db.Column(db.Integer, primary_key=True)
     cliente_id = db.Column(db.Integer, db.ForeignKey('clientes.id'))
+    vehiculo_id = db.Column(db.Integer, db.ForeignKey('vehiculos.id'), nullable=True)
+    ruta_id = db.Column(db.Integer, db.ForeignKey('rutas.id'), nullable=True)  # <-- AÑADE ESTO
     fecha_pedido = db.Column(db.DateTime, server_default=db.func.now())
     estado = db.Column(db.String(50), default='pendiente')
     prioridad = db.Column(db.String(20), default='normal')
     total = db.Column(db.Numeric(10,2), nullable=False)
+    
+    # RELACIONES CORREGIDAS
+    cliente = db.relationship('Cliente', backref='pedidos')
+    detalles = db.relationship('PedidoDetalle', backref='pedido', lazy=True, cascade="all, delete-orphan")
+    vehiculo = db.relationship('Vehiculo', backref='pedidos')
+    ruta = db.relationship('Ruta', back_populates='pedidos', foreign_keys=[ruta_id])  # <-- CORREGIDO
 
 
 # =========================
@@ -134,9 +136,6 @@ class Pedido(db.Model):
 # =========================
 
 class PedidoDetalle(db.Model):
-    """
-    Detalle de productos en un pedido.
-    """
     __tablename__ = 'pedido_detalles'
     id = db.Column(db.Integer, primary_key=True)
     pedido_id = db.Column(db.Integer, db.ForeignKey('pedidos.id', ondelete='CASCADE'))
@@ -144,6 +143,9 @@ class PedidoDetalle(db.Model):
     cantidad = db.Column(db.Integer, nullable=False)
     subtotal = db.Column(db.Numeric(10,2), nullable=False)
 
+    # --- AÑADE ESTA LÍNEA ---
+    # Esto crea la relación PedidoDetalle.producto
+    producto = db.relationship('Producto')
 
 # =========================
 # RUTAS DE ENTREGA
@@ -155,10 +157,20 @@ class Ruta(db.Model):
     """
     __tablename__ = 'rutas'
     id = db.Column(db.Integer, primary_key=True)
-    pedido_id = db.Column(db.Integer, db.ForeignKey('pedidos.id'))
+    # ELIMINA esta línea: pedido_id = db.Column(db.Integer, db.ForeignKey('pedidos.id'))
     conductor_id = db.Column(db.Integer, db.ForeignKey('conductores.id'))
     fecha_programada = db.Column(db.DateTime)
-    estado = db.Column(db.String(50), default='pendiente')
+    
+    # NUEVOS CAMPOS
+    fecha_inicio = db.Column(db.DateTime)
+    fecha_fin = db.Column(db.DateTime)
+    distancia_km = db.Column(db.Numeric(10, 2))
+    tiempo_estimado_min = db.Column(db.Integer)
+    
+    estado = db.Column(db.String(50), default='pendiente') # pendiente, en_camino, completada, cancelada
+    
+    # RELACIÓN CORREGIDA
+    pedidos = db.relationship('Pedido', back_populates='ruta', foreign_keys='Pedido.ruta_id')  # <-- CORREGIDO
 
 
 # =========================
@@ -204,9 +216,12 @@ class MetricaEntrega(db.Model):
     __tablename__ = 'metricas_entregas'
     id = db.Column(db.Integer, primary_key=True)
     ruta_id = db.Column(db.Integer, db.ForeignKey('rutas.id'))
-    tiempo_entrega = db.Column(db.Integer)
-    retraso = db.Column(db.Boolean)
-    combustible_usado = db.Column(db.Numeric(10,2))
+    
+    # --- CAMPOS MEJORADOS ---
+    tiempo_real_min = db.Column(db.Integer) # Tiempo real que tomó en minutos
+    retraso = db.Column(db.Boolean) # True si tiempo_real > tiempo_estimado
+    combustible_usado_lts = db.Column(db.Numeric(10,2)) # En litros, más estándar
+    # --- FIN CAMPOS MEJORADOS ---
 
 
 # =========================
@@ -468,31 +483,45 @@ class MovimientoPago(db.Model):
 # PRESUPUESTO / COMPRAS (compra de bobina con costos adicionales)
 # =========================
 
-class PresupuestoCompra(db.Model):
+class ProcesoImportacion(db.Model):
     """
-    Presupuesto (orden/registro) de compra de bobina con desglose de costos:
-    flete_marítimo, flete_terrestre y aduanas.
+    Modelo para gestionar el proceso completo de una importación de materia prima.
     """
-    __tablename__ = 'presupuestos_compra'
+    __tablename__ = 'procesos_importacion' # Nuevo nombre de tabla
     id = db.Column(db.Integer, primary_key=True)
-    proveedor_id = db.Column(db.Integer, db.ForeignKey('proveedores.id'), nullable=True)
-    referencia = db.Column(db.String(200))
+    proveedor_id = db.Column(db.Integer, db.ForeignKey('proveedores.id'), nullable=False)
+    producto_id = db.Column(db.Integer, db.ForeignKey('productos.id'), nullable=False) # Producto importado (ej: Bobina de Acero)
+    
+    referencia = db.Column(db.String(200), unique=True) # Ej: "IMPORT-2025-001"
     descripcion = db.Column(db.Text)
-    cantidad_bobinas = db.Column(db.Integer, nullable=False, default=1)
-    precio_bobina = db.Column(db.Numeric(14,2), nullable=False)
+    
+    cantidad = db.Column(db.Numeric(12,2), nullable=False) # Cantidad del producto (ej: 25000 kg)
+    precio_unitario = db.Column(db.Numeric(14,2), nullable=False) # Precio por unidad (ej: por kg)
+    
+    # Costos desglosados
+    costo_producto = db.Column(db.Numeric(16,2), default=0)
     costo_flete_maritimo = db.Column(db.Numeric(14,2), default=0)
     costo_flete_terrestre = db.Column(db.Numeric(14,2), default=0)
     costo_aduanas = db.Column(db.Numeric(14,2), default=0)
     otros_costos = db.Column(db.Numeric(14,2), default=0)
-    total_compra = db.Column(db.Numeric(16,2), nullable=False)
-    fecha = db.Column(db.DateTime, server_default=db.func.now())
-    estado = db.Column(db.String(50), default='borrador')  # borrador, aprobado, recibido, cancelado
+    total_importacion = db.Column(db.Numeric(16,2), default=0)
+    
+    # Fechas clave
+    fecha_orden = db.Column(db.DateTime, server_default=db.func.now())
+    fecha_llegada_estimada = db.Column(db.DateTime)
+    fecha_llegada_real = db.Column(db.DateTime)
+    
+    # Estado del proceso
+    estado = db.Column(db.String(50), default='En Cotizacion')  # Ej: En Cotizacion, Ordenado, En Transito, En Aduana, Recibido
+
+    # Relaciones
     proveedor = db.relationship('Proveedor')
+    producto = db.relationship('Producto')
 
     def calcular_total(self):
-        subtotal = (self.cantidad_bobinas or 0) * (self.precio_bobina or 0)
-        extras = (self.costo_flete_maritimo or 0) + (self.costo_flete_terrestre or 0) + (self.costo_aduanas or 0) + (self.otros_costos or 0)
-        self.total_compra = subtotal + extras
+        self.costo_producto = (self.cantidad or 0) * (self.precio_unitario or 0)
+        costos_logisticos = (self.costo_flete_maritimo or 0) + (self.costo_flete_terrestre or 0) + (self.costo_aduanas or 0) + (self.otros_costos or 0)
+        self.total_importacion = self.costo_producto + costos_logisticos
 
 
 # =========================

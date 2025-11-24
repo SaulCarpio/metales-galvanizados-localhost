@@ -13,12 +13,20 @@ const OrdenCompraCrud = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [resO, resP] = await Promise.all([ordenesAPI.list(), proveedoresAPI.list()]);
-      if (resO.data.success) setOrdenes(resO.data.ordenes);
-      if (resP.data.success) setProveedores(resP.data.proveedores);
-    } catch (e) { console.error(e); }
+      const [resO, resP] = await Promise.all([
+        ordenesAPI.list(),
+        proveedoresAPI.list()
+      ]);
+  
+      console.log("🔥 resO:", resO);
+      console.log("🔥 resP:", resP);
+  
+      // NO pongas nada más hasta ver el log
+    } catch (e) {
+      console.error("❌ ERROR REAL:", e);
+    }
     setLoading(false);
-  };
+  };  
 
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
@@ -33,7 +41,7 @@ const OrdenCompraCrud = () => {
       const detalles = form.detalles.map(d => ({ producto_id: d.producto_id, cantidad: Number(d.cantidad), precio_unitario: Number(d.precio_unitario) }));
       const payload = { proveedor_id: Number(form.proveedor_id), referencia: form.referencia, estado: form.estado, detalles };
       const res = await ordenesAPI.create(payload);
-      if (res.data.success) { fetchData(); setForm({ proveedor_id: '', referencia: '', estado: 'borrador', detalles: [] }); }
+      if (res.success) { fetchData(); setForm({ proveedor_id: '', referencia: '', estado: 'borrador', detalles: [] }); }
     } catch (err) { console.error(err); }
   };
 
